@@ -2004,6 +2004,30 @@ static bool hva_to_pfn_fast(unsigned long addr, bool write_fault,
 	return false;
 }
 
+static void kvm_send_vm_fault_signal(int fault_error, int errno,
+				     unsigned long address,
+				     struct task_struct *tsk)
+{
+	kernel_siginfo_t info;
+
+	clear_siginfo(&info);
+
+	if (fault_error == VM_FAULT_SIGBUS)
+		info.si_signo = SIGBUS;
+	else if (fault_error == VM_FAULT_SIGSEGV)
+		info.si_signo = SIGSEGV;
+	else
+		// Other fault errors should not result in a signal.
+		return;
+
+	info.si_errno = errno;
+	info.si_code = BUS_ADRERR;
+	info.si_addr = (void __user *)address;
+	info.si_addr_lsb = PAGE_SHIFT;
+
+	send_sig_info(info.si_signo, &info, tsk);
+}
+
 /*
  * The slow path to get the pfn of the specified host virtual address,
  * 1 indicates success, -errno is returned if error is detected.
@@ -2014,6 +2038,7 @@ static int hva_to_pfn_slow(unsigned long addr, bool *async, bool write_fault,
 	unsigned int flags = FOLL_HWPOISON;
 	struct page *page;
 	int npages = 0;
+	int fault_error;
 
 	might_sleep();
 
@@ -2025,7 +2050,10 @@ static int hva_to_pfn_slow(unsigned long addr, bool *async, bool write_fault,
 	if (async)
 		flags |= FOLL_NOWAIT;
 
-	npages = get_user_pages_unlocked(addr, 1, &page, flags);
+	npages = get_user_pages_unlocked(addr, 1, &page, flags, &fault_error);
+	if (fault_error & VM_FAULT_ERROR)
+		kvm_send_vm_fault_signal(fault_error, npages, addr, current);
+
 	if (npages != 1)
 		return npages;
 

@@ -5017,7 +5017,8 @@ static void record_subpages_vmas(struct page *page, struct vm_area_struct *vma,
 long follow_hugetlb_page(struct mm_struct *mm, struct vm_area_struct *vma,
 			 struct page **pages, struct vm_area_struct **vmas,
 			 unsigned long *position, unsigned long *nr_pages,
-			 long i, unsigned int flags, int *locked)
+			 long i, unsigned int flags, int *locked,
+			 int  *fault_error)
 {
 	unsigned long pfn_offset;
 	unsigned long vaddr = *position;
@@ -5103,6 +5104,8 @@ long follow_hugetlb_page(struct mm_struct *mm, struct vm_area_struct *vma,
 			}
 			ret = hugetlb_fault(mm, vma, vaddr, fault_flags);
 			if (ret & VM_FAULT_ERROR) {
+				if (fault_error)
+					*fault_error = ret;
 				err = vm_fault_to_errno(ret, flags);
 				remainder = 0;
 				break;
