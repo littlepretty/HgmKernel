@@ -16,7 +16,9 @@ struct userspace_mem_region {
 	int fd;
 	off_t offset;
 	void *host_mem;
+	void *host_alias;
 	void *mmap_start;
+	void *mmap_alias;
 	size_t mmap_size;
 	struct list_head list;
 };
