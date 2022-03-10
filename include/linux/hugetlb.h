@@ -38,6 +38,54 @@ typedef struct { unsigned long pd; } hugepd_t;
  */
 #define __NR_USED_SUBPAGE 3
 
+enum hugetlb_level {
+	HUGETLB_LEVEL_PTE = 1,
+	/*
+	 * We always include PMD, PUD, and P4D in this enum definition so that,
+	 * when logged as an integer, we can easily tell which level it is.
+	 */
+	HUGETLB_LEVEL_PMD,
+	HUGETLB_LEVEL_PUD,
+	HUGETLB_LEVEL_P4D,
+	HUGETLB_LEVEL_PGD,
+};
+
+struct hugetlb_pte {
+	pte_t *ptep;
+	unsigned int shift;
+	enum hugetlb_level level;
+	spinlock_t *ptl;
+};
+
+static inline
+void __hugetlb_pte_populate(struct hugetlb_pte *hpte, pte_t *ptep,
+			    unsigned int shift, enum hugetlb_level level,
+			    spinlock_t *ptl)
+{
+	/*
+	 * If 'shift' indicates that this PTE is contiguous, then @ptep must
+	 * be the first pte of the contiguous bunch.
+	 */
+	hpte->ptl = ptl;
+	hpte->ptep = ptep;
+	hpte->shift = shift;
+	hpte->level = level;
+}
+
+static inline
+unsigned long hugetlb_pte_size(const struct hugetlb_pte *hpte)
+{
+	return 1UL << hpte->shift;
+}
+
+static inline
+unsigned long hugetlb_pte_mask(const struct hugetlb_pte *hpte)
+{
+	return ~(hugetlb_pte_size(hpte) - 1);
+}
+
+bool hugetlb_pte_present_leaf(const struct hugetlb_pte *hpte, pte_t pte);
+
 struct hugepage_subpool {
 	spinlock_t lock;
 	long count;
@@ -1230,6 +1278,30 @@ static inline spinlock_t *huge_pte_lock(struct hstate *h,
 	ptl = huge_pte_lockptr(huge_page_shift(h), mm, pte);
 	spin_lock(ptl);
 	return ptl;
+}
+
+static inline
+spinlock_t *hugetlb_pte_lockptr(struct hugetlb_pte *hpte)
+{
+	return hpte->ptl;
+}
+
+static inline
+spinlock_t *hugetlb_pte_lock(struct hugetlb_pte *hpte)
+{
+	spinlock_t *ptl = hugetlb_pte_lockptr(hpte);
+
+	spin_lock(ptl);
+	return ptl;
+}
+
+static inline
+void hugetlb_pte_populate(struct mm_struct *mm, struct hugetlb_pte *hpte,
+			  pte_t *ptep, unsigned int shift,
+			  enum hugetlb_level level)
+{
+	__hugetlb_pte_populate(hpte, ptep, shift, level,
+			huge_pte_lockptr(shift, mm, ptep));
 }
 
 #if defined(CONFIG_HUGETLB_PAGE) && defined(CONFIG_CMA)
