@@ -50,6 +50,71 @@ enum {
 	__NR_USED_SUBPAGE,
 };
 
+typedef enum {
+	HUGETLB_LEVEL_PTE = 1,
+	HUGETLB_LEVEL_PMD,
+	HUGETLB_LEVEL_PUD,
+	HUGETLB_LEVEL_P4D,
+	HUGETLB_LEVEL_PGD,
+} hugetlb_level_t;
+
+struct hugetlb_pte {
+	pte_t *ptep;
+	unsigned int shift;
+	hugetlb_level_t level;
+	spinlock_t *ptl;
+};
+
+static inline
+void hugetlb_pte_populate(struct hugetlb_pte *hpte, pte_t *ptep,
+			  unsigned int shift, hugetlb_level_t level)
+{
+	BUG_ON(!ptep);
+	hpte->ptep = ptep;
+	hpte->shift = shift;
+	hpte->level = level;
+	hpte->ptl = NULL;
+}
+
+static inline
+unsigned long hugetlb_pte_size(const struct hugetlb_pte *hpte)
+{
+	BUG_ON(!hpte->ptep);
+	return 1UL << hpte->shift;
+}
+
+static inline
+unsigned long hugetlb_pte_mask(const struct hugetlb_pte *hpte)
+{
+	BUG_ON(!hpte->ptep);
+	return ~(hugetlb_pte_size(hpte) - 1);
+}
+
+static inline
+unsigned int hugetlb_pte_shift(const struct hugetlb_pte *hpte)
+{
+	BUG_ON(!hpte->ptep);
+	return hpte->shift;
+}
+
+static inline
+hugetlb_level_t hugetlb_pte_level(const struct hugetlb_pte *hpte)
+{
+	BUG_ON(!hpte->ptep);
+	return hpte->level;
+}
+
+static inline
+void hugetlb_pte_copy(struct hugetlb_pte *dest, const struct hugetlb_pte *src)
+{
+	dest->ptep = src->ptep;
+	dest->shift = src->shift;
+	dest->level = src->level;
+	dest->ptl = src->ptl;
+}
+
+bool hugetlb_pte_present_leaf(const struct hugetlb_pte *hpte);
+
 struct hugepage_subpool {
 	spinlock_t lock;
 	long count;
@@ -1129,6 +1194,7 @@ static inline void hugetlb_unregister_node(struct node *node)
 }
 #endif	/* CONFIG_HUGETLB_PAGE */
 
+/* These will be removed in a future patch. */
 static inline spinlock_t *huge_pte_lock(struct hstate *h,
 					struct mm_struct *mm, pte_t *pte)
 {
@@ -1145,6 +1211,25 @@ static inline spinlock_t *huge_pte_lock_shift(unsigned int shift,
 	spinlock_t *ptl;
 
 	ptl = huge_pte_lockptr(shift, mm, pte);
+	spin_lock(ptl);
+	return ptl;
+}
+
+static inline
+spinlock_t *hugetlb_pte_lockptr(struct mm_struct *mm, struct hugetlb_pte *hpte)
+{
+
+	BUG_ON(!hpte->ptep);
+	if (hpte->ptl)
+		return hpte->ptl;
+	return huge_pte_lockptr(hugetlb_pte_shift(hpte), mm, hpte->ptep);
+}
+
+static inline
+spinlock_t *hugetlb_pte_lock(struct mm_struct *mm, struct hugetlb_pte *hpte)
+{
+	spinlock_t *ptl = hugetlb_pte_lockptr(mm, hpte);
+
 	spin_lock(ptl);
 	return ptl;
 }
