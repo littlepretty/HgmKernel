@@ -46,6 +46,68 @@ enum {
 	__NR_USED_SUBPAGE,
 };
 
+struct hugetlb_pte {
+	pte_t *ptep;
+	unsigned int shift;
+};
+
+static inline
+void hugetlb_pte_init(struct hugetlb_pte *hpte)
+{
+	hpte->ptep = NULL;
+}
+
+static inline
+void hugetlb_pte_populate(struct hugetlb_pte *hpte, pte_t *ptep,
+			  unsigned int shift)
+{
+	BUG_ON(!ptep);
+	hpte->ptep = ptep;
+	hpte->shift = shift;
+}
+
+static inline
+unsigned long hugetlb_pte_size(const struct hugetlb_pte *hpte)
+{
+	BUG_ON(!hpte->ptep);
+	return 1UL << hpte->shift;
+}
+
+static inline
+unsigned long hugetlb_pte_mask(const struct hugetlb_pte *hpte)
+{
+	BUG_ON(!hpte->ptep);
+	return ~(hugetlb_pte_size(hpte) - 1);
+}
+
+static inline
+unsigned int hugetlb_pte_shift(const struct hugetlb_pte *hpte)
+{
+	BUG_ON(!hpte->ptep);
+	return hpte->shift;
+}
+
+static inline
+bool hugetlb_pte_huge(const struct hugetlb_pte *hpte)
+{
+	return !IS_ENABLED(CONFIG_HUGETLB_HIGH_GRANULARITY_MAPPING) ||
+		hugetlb_pte_shift(hpte) > PAGE_SHIFT;
+}
+
+static inline
+void hugetlb_pte_copy(struct hugetlb_pte *dest, const struct hugetlb_pte *src)
+{
+	dest->ptep = src->ptep;
+	dest->shift = src->shift;
+}
+
+bool hugetlb_pte_present_leaf(const struct hugetlb_pte *hpte);
+bool hugetlb_pte_none(const struct hugetlb_pte *hpte);
+bool hugetlb_pte_none_mostly(const struct hugetlb_pte *hpte);
+pte_t hugetlb_ptep_get(const struct hugetlb_pte *hpte);
+void hugetlb_pte_clear(struct mm_struct *mm, const struct hugetlb_pte *hpte,
+		       unsigned long address);
+
 struct hugepage_subpool {
 	spinlock_t lock;
 	long count;
@@ -1126,6 +1188,23 @@ static inline spinlock_t *huge_pte_lock_shift(unsigned int shift,
 	spinlock_t *ptl;
 
 	ptl = huge_pte_lockptr(shift, mm, pte);
+	spin_lock(ptl);
+	return ptl;
+}
+
+static inline
+spinlock_t *hugetlb_pte_lockptr(struct mm_struct *mm, struct hugetlb_pte *hpte)
+{
+
+	BUG_ON(!hpte->ptep);
+	return huge_pte_lockptr(hugetlb_pte_shift(hpte), mm, hpte->ptep);
+}
+
+static inline
+spinlock_t *hugetlb_pte_lock(struct mm_struct *mm, struct hugetlb_pte *hpte)
+{
+	spinlock_t *ptl = hugetlb_pte_lockptr(mm, hpte);
+
 	spin_lock(ptl);
 	return ptl;
 }
