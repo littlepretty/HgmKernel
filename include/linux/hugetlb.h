@@ -46,6 +46,16 @@ enum {
 	__NR_USED_SUBPAGE,
 };
 
+struct hugetlb_pte {
+	pte_t *ptep;
+	unsigned int shift;
+};
+
+static inline
+unsigned long hugetlb_pte_size(struct hugetlb_pte *pte) {
+	return 1UL << pte->shift;
+}
+
 struct hugepage_subpool {
 	spinlock_t lock;
 	long count;
