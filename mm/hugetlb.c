@@ -1118,6 +1118,34 @@ static bool vma_has_reserves(struct vm_area_struct *vma, long chg)
 	return false;
 }
 
+bool hugetlb_pte_present_leaf(const struct hugetlb_pte *hpte, pte_t pte)
+{
+	pgd_t pgd;
+	p4d_t p4d;
+	pud_t pud;
+	pmd_t pmd;
+
+	BUG_ON(!hpte->ptep);
+	switch (hugetlb_pte_level(hpte)) {
+		case HUGETLB_LEVEL_PGD:
+			pgd = __pgd(pte_val(pte));
+			return pgd_present(pgd) && pgd_leaf(pgd);
+		case HUGETLB_LEVEL_P4D:
+			p4d = __p4d(pte_val(pte));
+			return p4d_present(p4d) && p4d_leaf(p4d);
+		case HUGETLB_LEVEL_PUD:
+			pud = __pud(pte_val(pte));
+			return pud_present(pud) && pud_leaf(pud);
+		case HUGETLB_LEVEL_PMD:
+			pmd = __pmd(pte_val(pte));
+			return pmd_present(pmd) && pmd_leaf(pmd);
+		case HUGETLB_LEVEL_PTE:
+			return pte_present(pte);
+        default:
+            BUG();
+	}
+}
+
 static void enqueue_huge_page(struct hstate *h, struct page *page)
 {
 	int nid = page_to_nid(page);
