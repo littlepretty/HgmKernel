@@ -46,6 +46,51 @@ enum {
 	__NR_USED_SUBPAGE,
 };
 
+struct hugetlb_pte {
+	pte_t *ptep;
+	unsigned int shift;
+	bool valid;
+};
+
+static inline
+void hugetlb_pte_init(struct hugetlb_pte *hpte) {
+	hpte->valid = false;
+}
+
+static inline
+void hugetlb_pte_populate(struct hugetlb_pte *hpte, pte_t *ptep,
+			  unsigned int shift) {
+	BUG_ON(!ptep);
+	hpte->ptep = ptep;
+	hpte->shift = shift;
+	hpte->valid = true;
+}
+
+static inline
+unsigned long hugetlb_pte_size(const struct hugetlb_pte *hpte) {
+	BUG_ON(!hpte->valid);
+	return 1UL << hpte->shift;
+}
+
+static inline
+unsigned long hugetlb_pte_mask(const struct hugetlb_pte *hpte) {
+	BUG_ON(!hpte->valid);
+	return ~(hugetlb_pte_size(hpte) - 1);
+}
+
+static inline
+unsigned int hugetlb_pte_shift(const struct hugetlb_pte *hpte) {
+	BUG_ON(!hpte->valid);
+	return hpte->shift;
+}
+
+static inline
+void hugetlb_pte_copy(struct hugetlb_pte *dest, const struct hugetlb_pte *src) {
+	dest->ptep = src->ptep;
+	dest->shift = src->shift;
+	dest->valid = src->valid;
+}
+
 struct hugepage_subpool {
 	spinlock_t lock;
 	long count;
@@ -1126,6 +1171,20 @@ static inline spinlock_t *huge_pte_lock_shift(unsigned int shift,
 	spinlock_t *ptl;
 
 	ptl = huge_pte_lockptr(shift, mm, pte);
+	spin_lock(ptl);
+	return ptl;
+}
+
+static inline
+spinlock_t *hugetlb_pte_lockptr(struct mm_struct *mm, struct hugetlb_pte *hpte) {
+
+	BUG_ON(!hpte->valid || !hpte->ptep);
+	return huge_pte_lockptr(hugetlb_pte_shift(hpte), mm, hpte->ptep);
+}
+
+static inline
+spinlock_t *hugetlb_pte_lock(struct mm_struct *mm, struct hugetlb_pte *hpte) {
+	spinlock_t *ptl = hugetlb_pte_lockptr(mm, hpte);
 	spin_lock(ptl);
 	return ptl;
 }
