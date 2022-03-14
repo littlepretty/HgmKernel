@@ -69,6 +69,11 @@ static bool hugetlb_cma_page(struct page *page, unsigned int order)
 #endif
 static unsigned long hugetlb_cma_size __initdata;
 
+/* Forward declaration */
+static pte_t make_huge_pte_with_shift(struct vm_area_struct *vma,
+				      struct page *page, int writable,
+				      int shift);
+
 /*
  * Minimum page order among possible hugepage sizes, set to a proper value
  * at boot time.
@@ -4681,12 +4686,11 @@ const struct vm_operations_struct hugetlb_vm_ops = {
 	.pagesize = hugetlb_vm_op_pagesize,
 };
 
-static pte_t make_huge_pte(struct vm_area_struct *vma, struct page *page,
-				int writable)
+static pte_t make_huge_pte_with_shift(struct vm_area_struct *vma,
+				      struct page *page, int writable,
+				      int shift)
 {
 	pte_t entry;
-	unsigned int shift = huge_page_shift(hstate_vma(vma));
-
 	if (writable) {
 		entry = huge_pte_mkwrite(huge_pte_mkdirty(mk_huge_pte(page,
 					 vma->vm_page_prot)));
@@ -4695,9 +4699,18 @@ static pte_t make_huge_pte(struct vm_area_struct *vma, struct page *page,
 					   vma->vm_page_prot));
 	}
 	entry = pte_mkyoung(entry);
-	entry = arch_make_huge_pte(entry, shift, vma->vm_flags);
-
+	if (shift != PAGE_SHIFT)
+		entry = arch_make_huge_pte(entry, shift, vma->vm_flags);
+	else
+		entry = mk_pte(page, vma->vm_page_prot);
 	return entry;
+}
+
+static pte_t make_huge_pte(struct vm_area_struct *vma, struct page *page,
+			   int writable)
+{
+	unsigned int shift = huge_page_shift(hstate_vma(vma));
+	return make_huge_pte_with_shift(vma, page, writable, shift);
 }
 
 static void set_huge_ptep_writable(struct vm_area_struct *vma,
