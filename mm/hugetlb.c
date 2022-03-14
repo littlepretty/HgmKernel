@@ -4686,23 +4686,30 @@ const struct vm_operations_struct hugetlb_vm_ops = {
 	.pagesize = hugetlb_vm_op_pagesize,
 };
 
-static pte_t make_huge_pte(struct vm_area_struct *vma, struct page *page,
-				int writable)
+static pte_t make_huge_pte_with_shift(struct vm_area_struct *vma,
+				      struct page *page, int writable,
+				      int shift)
 {
-	pte_t entry;
+	bool huge = shift > PAGE_SHIFT;
+	pte_t entry = huge ? mk_huge_pte(page, vma->vm_page_prot)
+			   : mk_pte(page, vma->vm_page_prot);
+
+	if (writable)
+		entry = huge ? huge_pte_mkwrite(entry) : pte_mkwrite(entry);
+	else
+		entry = huge ? huge_pte_wrprotect(entry) : pte_wrprotect(entry);
+	pte_mkyoung(entry);
+	if (huge)
+		entry = arch_make_huge_pte(entry, shift, vma->vm_flags);
+	return entry;
+}
+
+static pte_t make_huge_pte(struct vm_area_struct *vma, struct page *page,
+			   int writable)
+{
 	unsigned int shift = huge_page_shift(hstate_vma(vma));
 
-	if (writable) {
-		entry = huge_pte_mkwrite(huge_pte_mkdirty(mk_huge_pte(page,
-					 vma->vm_page_prot)));
-	} else {
-		entry = huge_pte_wrprotect(mk_huge_pte(page,
-					   vma->vm_page_prot));
-	}
-	entry = pte_mkyoung(entry);
-	entry = arch_make_huge_pte(entry, shift, vma->vm_flags);
-
-	return entry;
+	return make_huge_pte_with_shift(vma, page, writable, shift);
 }
 
 static void set_huge_ptep_writable(struct vm_area_struct *vma,
