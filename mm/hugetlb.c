@@ -34,6 +34,7 @@
 #include <linux/nospec.h>
 #include <linux/delayacct.h>
 #include <linux/sort.h>
+#include <linux/mman.h>
 
 #include <asm/page.h>
 #include <asm/pgalloc.h>
@@ -68,6 +69,16 @@ static bool hugetlb_cma_page(struct page *page, unsigned int order)
 }
 #endif
 static unsigned long hugetlb_cma_size __initdata;
+
+struct hugetlb_vma_priv {
+	struct resv_map *resv_map;
+	bool high_granularity_supported;
+};
+
+/* Forward declaration */
+static pte_t make_huge_pte_with_shift(struct vm_area_struct *vma,
+				      struct page *page, int writable,
+				      int shift);
 
 /*
  * Minimum page order among possible hugepage sizes, set to a proper value
@@ -883,15 +894,33 @@ __weak unsigned long vma_mmu_pagesize(struct vm_area_struct *vma)
  * reference it, this region map represents those offsets which have consumed
  * reservation ie. where pages have been instantiated.
  */
-static unsigned long get_vma_private_data(struct vm_area_struct *vma)
+static struct hugetlb_vma_priv *get_vma_private_data(struct vm_area_struct *vma)
 {
-	return (unsigned long)vma->vm_private_data;
+	struct hugetlb_vma_priv *hvp = vma->vm_private_data;
+	if (!hvp) {
+		hvp = kzalloc(sizeof(*hvp), GFP_KERNEL);
+		BUG_ON(!hvp); // FIXME
+		hvp->resv_map = 0;
+		hvp->high_granularity_supported = false;
+		vma->vm_private_data = hvp;
+	}
+	return hvp;
 }
 
-static void set_vma_private_data(struct vm_area_struct *vma,
-							unsigned long value)
+static unsigned long get_vma_private_resv_data(struct vm_area_struct *vma)
 {
-	vma->vm_private_data = (void *)value;
+	struct hugetlb_vma_priv *hvp;
+	if (!vma->vm_private_data)
+		return 0;
+	hvp = get_vma_private_data(vma);
+	return (unsigned long)hvp->resv_map;
+}
+static void set_vma_private_resv_data(struct vm_area_struct *vma,
+				      unsigned long value)
+{
+	struct hugetlb_vma_priv *hvp;
+	hvp = get_vma_private_data(vma);
+	hvp->resv_map = (void *)value;
 }
 
 static void
@@ -987,7 +1016,7 @@ static struct resv_map *vma_resv_map(struct vm_area_struct *vma)
 		return inode_resv_map(inode);
 
 	} else {
-		return (struct resv_map *)(get_vma_private_data(vma) &
+		return (struct resv_map *)(get_vma_private_resv_data(vma) &
 							~HPAGE_RESV_MASK);
 	}
 }
@@ -997,7 +1026,7 @@ static void set_vma_resv_map(struct vm_area_struct *vma, struct resv_map *map)
 	VM_BUG_ON_VMA(!is_vm_hugetlb_page(vma), vma);
 	VM_BUG_ON_VMA(vma->vm_flags & VM_MAYSHARE, vma);
 
-	set_vma_private_data(vma, (get_vma_private_data(vma) &
+	set_vma_private_resv_data(vma, (get_vma_private_resv_data(vma) &
 				HPAGE_RESV_MASK) | (unsigned long)map);
 }
 
@@ -1006,14 +1035,14 @@ static void set_vma_resv_flags(struct vm_area_struct *vma, unsigned long flags)
 	VM_BUG_ON_VMA(!is_vm_hugetlb_page(vma), vma);
 	VM_BUG_ON_VMA(vma->vm_flags & VM_MAYSHARE, vma);
 
-	set_vma_private_data(vma, get_vma_private_data(vma) | flags);
+	set_vma_private_resv_data(vma, get_vma_private_resv_data(vma) | flags);
 }
 
 static int is_vma_resv_set(struct vm_area_struct *vma, unsigned long flag)
 {
 	VM_BUG_ON_VMA(!is_vm_hugetlb_page(vma), vma);
 
-	return (get_vma_private_data(vma) & flag) != 0;
+	return (get_vma_private_resv_data(vma) & flag) != 0;
 }
 
 /* Reset counters to 0 and clear all HPAGE_RESV_* flags */
@@ -1021,7 +1050,7 @@ void reset_vma_resv_huge_pages(struct vm_area_struct *vma)
 {
 	VM_BUG_ON_VMA(!is_vm_hugetlb_page(vma), vma);
 	if (!(vma->vm_flags & VM_MAYSHARE))
-		vma->vm_private_data = (void *)0;
+		set_vma_private_resv_data(vma, 0);
 }
 
 /*
@@ -4681,12 +4710,11 @@ const struct vm_operations_struct hugetlb_vm_ops = {
 	.pagesize = hugetlb_vm_op_pagesize,
 };
 
-static pte_t make_huge_pte(struct vm_area_struct *vma, struct page *page,
-				int writable)
+static pte_t make_huge_pte_with_shift(struct vm_area_struct *vma,
+				      struct page *page, int writable,
+				      int shift)
 {
 	pte_t entry;
-	unsigned int shift = huge_page_shift(hstate_vma(vma));
-
 	if (writable) {
 		entry = huge_pte_mkwrite(huge_pte_mkdirty(mk_huge_pte(page,
 					 vma->vm_page_prot)));
@@ -4695,9 +4723,18 @@ static pte_t make_huge_pte(struct vm_area_struct *vma, struct page *page,
 					   vma->vm_page_prot));
 	}
 	entry = pte_mkyoung(entry);
-	entry = arch_make_huge_pte(entry, shift, vma->vm_flags);
-
+	if (shift != PAGE_SHIFT)
+		entry = arch_make_huge_pte(entry, shift, vma->vm_flags);
+	else
+		entry = mk_pte(page, vma->vm_page_prot);
 	return entry;
+}
+
+static pte_t make_huge_pte(struct vm_area_struct *vma, struct page *page,
+			   int writable)
+{
+	unsigned int shift = huge_page_shift(hstate_vma(vma));
+	return make_huge_pte_with_shift(vma, page, writable, shift);
 }
 
 static void set_huge_ptep_writable(struct vm_area_struct *vma,
