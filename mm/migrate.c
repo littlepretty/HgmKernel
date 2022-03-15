@@ -330,7 +330,8 @@ void __migration_entry_wait_huge(pte_t *ptep, spinlock_t *ptl)
 
 void migration_entry_wait_huge(struct vm_area_struct *vma, pte_t *pte)
 {
-	spinlock_t *ptl = huge_pte_lockptr(hstate_vma(vma), vma->vm_mm, pte);
+	spinlock_t *ptl = huge_pte_lockptr(huge_page_shift(hstate_vma(vma)),
+					   vma->vm_mm, pte);
 
 	__migration_entry_wait_huge(pte, ptl);
 }
