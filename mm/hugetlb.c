@@ -108,6 +108,13 @@ struct mutex *hugetlb_fault_mutex_table ____cacheline_aligned_in_smp;
 /* Forward declaration */
 static int hugetlb_acct_memory(struct hstate *h, long delta);
 
+static struct page *calculate_subpage(struct hstate *h, struct page *hpage, unsigned long addr)
+{
+	size_t idx = (addr & ~huge_page_mask(h))/PAGE_SIZE;
+	BUG_ON(idx >= pages_per_huge_page(h));
+	return &hpage[idx];
+}
+
 static inline bool subpool_is_free(struct hugepage_subpool *spool)
 {
 	if (spool->count)
@@ -933,6 +940,186 @@ resv_map_set_hugetlb_cgroup_uncharge_info(struct resv_map *resv_map,
 		resv_map->css = &h_cg->css;
 	}
 #endif
+}
+
+int collapse_hugetlb_range(struct vm_area_struct *vma,
+			   unsigned long start,
+			   unsigned long end)
+{
+#ifdef CONFIG_HUGETLB_DOUBLE_MAP
+	struct mm_struct *mm = vma->vm_mm;
+	struct hstate *h = hstate_vma(vma);
+	struct address_space *mapping = vma->vm_file->f_mapping;
+	struct mmu_notifier_range range;
+	unsigned long current_addr;
+	struct page *page, *hpage;
+	int ret = 0;
+	size_t shift_idx;
+	spinlock_t *ptl;
+	pgoff_t idx;
+	struct hugetlb_vma_priv *priv = get_vma_private_data(vma);
+	struct mmu_gather tlb;
+
+	// PTL must be locked, and mapping lock must be write-locked.
+	i_mmap_assert_write_locked(vma->vm_file->f_mapping);
+
+	mmu_notifier_range_init(&range, MMU_NOTIFY_CLEAR, 0, vma, vma->vm_mm,
+				start, end);
+	mmu_notifier_invalidate_range_start(&range);
+
+	tlb_gather_mmu(&tlb, mm);
+
+	current_addr = start;
+restart:
+	for (shift_idx = 0; shift_idx < priv->double_mapped_shifts_num; ++shift_idx) {
+		unsigned int shift = priv->double_mapped_shifts[shift_idx];
+		unsigned long sz = 1 << shift;
+		struct hugetlb_pte hpte;
+		pte_t entry;
+		if (current_addr >= end)
+			goto out;
+
+		if (!IS_ALIGNED(current_addr, sz) || (current_addr + sz > end))
+			continue;
+
+		if (sz == PAGE_SIZE) {
+			// There is nothing to do.
+			current_addr += PAGE_SIZE;
+			goto restart;
+		}
+
+		BUG_ON(sz != PMD_SIZE && sz != PUD_SIZE);
+
+		ret = huge_pte_alloc_high_granularity(&hpte, mm, vma, current_addr,
+						      sz, SPLIT_NEVER, true);
+		BUG_ON(ret);
+		if (hpte.shift > shift) {
+			current_addr += (1 << hpte.shift);
+			goto restart;
+		}
+
+		BUG_ON(hpte.shift != shift);
+
+		ptl = huge_pte_lock_shift(hpte.shift, mm, hpte.ptep);
+		entry = huge_ptep_get(hpte.ptep);
+
+		if (huge_pte_none(entry) || pte_none(entry)) {
+			current_addr += sz;
+			spin_unlock(ptl);
+			goto restart;
+		}
+
+		idx = vma_hugecache_offset(h, vma, current_addr);
+		hpage = find_lock_page(mapping, idx);
+		page = calculate_subpage(h, hpage, current_addr);
+		if (sz == PMD_SIZE) {
+			free_pte_range(&tlb, (pmd_t*)hpte.ptep, current_addr);
+		} else {
+			BUG_ON(sz != PUD_SIZE);
+			free_pmd_range(&tlb, (pud_t*)hpte.ptep,
+				       current_addr, current_addr + PUD_SIZE,
+				       current_addr, current_addr + PUD_SIZE);
+		}
+		entry = make_huge_pte_with_shift(vma, page, vma->vm_flags & VM_WRITE, shift);
+		set_huge_pte_at(mm, current_addr, hpte.ptep, entry);
+		spin_unlock(ptl);
+		unlock_page(hpage);
+
+		current_addr += shift;
+		goto restart;
+	}
+	ret = -EINVAL;
+
+out:
+	BUG_ON(current_addr > end);
+	tlb_finish_mmu(&tlb);
+	mmu_notifier_invalidate_range_end(&range);
+#else
+	ret = -EINVAL;
+#endif // CONFIG_HUGETLB_DOUBLE_MAP
+	return ret;
+}
+
+static int split_hugetlb_pte(struct vm_area_struct *vma,
+			     unsigned long address,
+			     pte_t *ptep, unsigned int current_shift)
+{
+	struct mm_struct *mm = vma->vm_mm;
+	struct hstate *h = hstate_vma(vma);
+	struct mmu_notifier_range range;
+	unsigned long current_addr;
+	struct mmu_gather tlb;
+	pte_t entry;
+	struct page *hpage = NULL, *subpage;
+	unsigned long desired_sz, desired_mask, desired_shift;
+	unsigned long sz = 1 << current_shift;
+	unsigned long current_mask = ~(sz - 1);
+	unsigned long rounded_addr = address & current_mask;
+
+	// PTL must be locked, and mapping lock must be write-locked.
+	i_mmap_assert_write_locked(vma->vm_file->f_mapping);
+
+	BUG_ON(!ptep);
+
+	switch (current_shift) {
+		case PMD_SHIFT:
+			desired_sz = PAGE_SIZE;
+			desired_mask = PAGE_MASK;
+			desired_shift = PAGE_SHIFT;
+			break;
+		case PUD_SHIFT:
+			desired_sz = PMD_SIZE;
+			desired_mask = PMD_MASK;
+			desired_shift = PMD_SHIFT;
+			break;
+		default:
+			BUG();
+	}
+
+	mmu_notifier_range_init(&range, MMU_NOTIFY_CLEAR, 0, vma, vma->vm_mm,
+				rounded_addr, rounded_addr + sz);
+	mmu_notifier_invalidate_range_start(&range);
+
+	entry = huge_ptep_get_and_clear(mm, rounded_addr, ptep);
+	BUG_ON(!pte_none(entry) && !pte_huge(entry));
+
+	if (!huge_pte_none(*ptep))
+		hpage = pte_page(*ptep);
+
+	current_addr = rounded_addr;
+	while (current_addr < rounded_addr + sz) {
+		pte_t *new_pte, new_entry;
+		if (sz == PUD_SIZE) {
+			new_pte = (pte_t*)pmd_alloc(mm, (pud_t*)ptep, current_addr);
+		} else {
+			pte_alloc(mm, (pmd_t*)ptep);
+			new_pte = pte_offset_map((pmd_t*)ptep, current_addr);
+		}
+		if (!new_pte) {
+			goto out_free;
+		}
+		if (hpage) {
+			subpage = calculate_subpage(h, hpage, current_addr);
+			new_entry = make_huge_pte_with_shift(vma, subpage, huge_pte_write(entry), desired_shift);
+			set_huge_pte_at(mm, current_addr, ptep, new_entry);
+		}
+		current_addr += desired_sz;
+	}
+	mmu_notifier_invalidate_range_end(&range);
+	return 0;
+out_free:
+	tlb_gather_mmu(&tlb, mm);
+	if (sz == PUD_SIZE) {
+		free_pmd_range(&tlb, (pud_t*)ptep, address, current_addr, address,
+				address + PUD_SIZE);
+	} else {
+		free_pte_range(&tlb, (pmd_t*)ptep, address);
+	}
+	// Restore the old entry.
+	set_huge_pte_at(mm, rounded_addr, ptep, entry);
+	tlb_finish_mmu(&tlb);
+	mmu_notifier_invalidate_range_end(&range);
+	return -ENOMEM;
 }
 
 struct resv_map *resv_map_alloc(void)
@@ -6691,6 +6878,92 @@ pte_t *huge_pte_offset(struct mm_struct *mm,
 }
 
 #endif /* CONFIG_ARCH_WANT_GENERAL_HUGETLB */
+
+#ifdef CONFIG_HUGETLB_DOUBLE_MAP
+int huge_pte_alloc_high_granularity(struct hugetlb_pte *hpte,
+				    struct mm_struct *mm,
+				    struct vm_area_struct *vma,
+				    unsigned long addr,
+				    unsigned int desired_sz,
+				    enum split_mode mode,
+				    bool write_locked)
+{
+	pgd_t *pgd;
+	p4d_t *p4d;
+	pud_t *pud;
+	pmd_t *pmd;
+	pte_t *pte = NULL;
+	struct address_space *mapping = vma->vm_file->f_mapping;
+	bool has_write_lock = write_locked;
+	unsigned int actual_shift = 0;
+
+	i_mmap_assert_locked(mapping);
+
+	pgd = pgd_offset(mm, addr);
+	p4d = p4d_alloc(mm, pgd, addr);
+	if (!p4d)
+		goto out;
+
+retry:
+	pud = pud_alloc(mm, p4d, addr);
+	if (!pud)
+		goto out;
+	if (pud_none(*pud) || pud_huge(*pud)) {
+		if (desired_sz < PUD_SIZE &&
+				((pud_none(*pud) && (mode & SPLIT_NONE)) ||
+				(pud_huge(*pud) && (mode & SPLIT_PRESENT)))) {
+			if (!has_write_lock) {
+				i_mmap_unlock_read(mapping);
+				i_mmap_lock_write(mapping);
+				has_write_lock = true;
+				goto retry;
+			}
+			split_hugetlb_pte(vma, addr, (pte_t*)pud, PUD_SHIFT);
+		} else {
+			pte = (pte_t*)pud;
+			actual_shift = PUD_SHIFT;
+			goto out;
+		}
+	}
+	pmd = pmd_alloc(mm, pud, addr);
+	if (!pmd)
+		goto out;
+	if (pmd_none(*pmd) || pmd_huge(*pmd)) {
+		if (desired_sz < PMD_SIZE &&
+				((pmd_none(*pmd) && (mode & SPLIT_NONE)) ||
+				(pmd_huge(*pmd) && (mode & SPLIT_PRESENT)))) {
+			if (!has_write_lock) {
+				i_mmap_unlock_read(mapping);
+				i_mmap_lock_write(mapping);
+				has_write_lock = true;
+				goto retry;
+			}
+			split_hugetlb_pte(vma, addr, (pte_t*)pmd, PMD_SHIFT);
+		} else {
+			pte = (pte_t*)pmd;
+			actual_shift = PMD_SHIFT;
+			goto out;
+		}
+	}
+	actual_shift = PAGE_SHIFT;
+	pte = pte_offset_map(pmd, addr);
+out:
+	if (has_write_lock && !write_locked) {
+		// We originally started holding the read lock, but now
+		// we are holding the write lock. So drop the lock and rewalk.
+		i_mmap_unlock_write(mapping);
+		i_mmap_lock_read(mapping);
+		has_write_lock = false;
+		if (pte)
+			// Page table could have changed from under us.
+			// We need to re-walk.
+			goto retry;
+	}
+	hpte->shift = actual_shift;
+	hpte->ptep = pte;
+	return 0;
+}
+#endif /* CONFIG_HUGETLB_DOUBLE_MAP */
 
 /*
  * These functions are overwritable if your architecture needs its own
