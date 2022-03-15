@@ -1847,6 +1847,13 @@ void unmap_vmas(struct mmu_gather *tlb, struct vm_area_struct *start_vma,
 
 struct mmu_notifier_range;
 
+void free_pte_range(struct mmu_gather *tlb, pmd_t *pmd, unsigned long addr);
+void free_pmd_range(struct mmu_gather *tlb, pud_t *pud, unsigned long addr,
+		unsigned long end, unsigned long floor, unsigned long ceiling);
+void free_pud_range(struct mmu_gather *tlb, p4d_t *p4d, unsigned long addr,
+		unsigned long end, unsigned long floor, unsigned long ceiling);
+void free_p4d_range(struct mmu_gather *tlb, pgd_t *pgd, unsigned long addr,
+		unsigned long end, unsigned long floor, unsigned long ceiling);
 void free_pgd_range(struct mmu_gather *tlb, unsigned long addr,
 		unsigned long end, unsigned long floor, unsigned long ceiling);
 int
