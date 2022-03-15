@@ -174,7 +174,8 @@ bool page_vma_mapped_walk(struct page_vma_mapped_walk *pvmw)
 		if (!pvmw->pte)
 			return false;
 
-		pvmw->ptl = huge_pte_lockptr(page_hstate(page), mm, pvmw->pte);
+		pvmw->ptl = huge_pte_lockptr(huge_page_shift(page_hstate(page)),
+					     mm, pvmw->pte);
 		spin_lock(pvmw->ptl);
 		if (!check_pte(pvmw))
 			return not_found(pvmw);
