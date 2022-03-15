@@ -227,7 +227,7 @@ static void check_sync_rss_stat(struct task_struct *task)
  * Note: this doesn't free the actual pages themselves. That
  * has been handled earlier when unmapping all the memory regions.
  */
-static void free_pte_range(struct mmu_gather *tlb, pmd_t *pmd,
+void free_pte_range(struct mmu_gather *tlb, pmd_t *pmd,
 			   unsigned long addr)
 {
 	pgtable_t token = pmd_pgtable(*pmd);
@@ -236,7 +236,7 @@ static void free_pte_range(struct mmu_gather *tlb, pmd_t *pmd,
 	mm_dec_nr_ptes(tlb->mm);
 }
 
-static inline void free_pmd_range(struct mmu_gather *tlb, pud_t *pud,
+inline void free_pmd_range(struct mmu_gather *tlb, pud_t *pud,
 				unsigned long addr, unsigned long end,
 				unsigned long floor, unsigned long ceiling)
 {
@@ -270,7 +270,7 @@ static inline void free_pmd_range(struct mmu_gather *tlb, pud_t *pud,
 	mm_dec_nr_pmds(tlb->mm);
 }
 
-static inline void free_pud_range(struct mmu_gather *tlb, p4d_t *p4d,
+inline void free_pud_range(struct mmu_gather *tlb, p4d_t *p4d,
 				unsigned long addr, unsigned long end,
 				unsigned long floor, unsigned long ceiling)
 {
@@ -304,7 +304,7 @@ static inline void free_pud_range(struct mmu_gather *tlb, p4d_t *p4d,
 	mm_dec_nr_puds(tlb->mm);
 }
 
-static inline void free_p4d_range(struct mmu_gather *tlb, pgd_t *pgd,
+inline void free_p4d_range(struct mmu_gather *tlb, pgd_t *pgd,
 				unsigned long addr, unsigned long end,
 				unsigned long floor, unsigned long ceiling)
 {
