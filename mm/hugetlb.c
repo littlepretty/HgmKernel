@@ -5016,7 +5016,7 @@ int copy_hugetlb_page_range(struct mm_struct *dst, struct mm_struct *src,
 		}
 
 		dst_ptl = huge_pte_lock(h, dst, dst_pte);
-		src_ptl = huge_pte_lockptr(h, src, src_pte);
+		src_ptl = huge_pte_lockptr(huge_page_shift(h), src, src_pte);
 		spin_lock_nested(src_ptl, SINGLE_DEPTH_NESTING);
 		entry = huge_ptep_get(src_pte);
 again:
@@ -5097,7 +5097,8 @@ again:
 
 				/* Install the new hugetlb folio if src pte stable */
 				dst_ptl = huge_pte_lock(h, dst, dst_pte);
-				src_ptl = huge_pte_lockptr(h, src, src_pte);
+				src_ptl = huge_pte_lockptr(huge_page_shift(h),
+							   src, src_pte);
 				spin_lock_nested(src_ptl, SINGLE_DEPTH_NESTING);
 				entry = huge_ptep_get(src_pte);
 				if (!pte_same(src_pte_old, entry)) {
@@ -5151,7 +5152,7 @@ static void move_huge_pte(struct vm_area_struct *vma, unsigned long old_addr,
 	pte_t pte;
 
 	dst_ptl = huge_pte_lock(h, mm, dst_pte);
-	src_ptl = huge_pte_lockptr(h, mm, src_pte);
+	src_ptl = huge_pte_lockptr(huge_page_shift(h), mm, src_pte);
 
 	/*
 	 * We don't have to worry about the ordering of src and dst ptlocks
