@@ -260,6 +260,11 @@ config HUGETLB_PAGE_FREE_VMEMMAP_DEFAULT_ON
 	  to enable freeing vmemmap pages of HugeTLB by default. It can then
 	  be disabled on the command line via hugetlb_free_vmemmap=off.
 
+config HUGETLB_DOUBLE_MAP
+	bool "Enable HugeTLB double-mapping."
+	default y
+	depends on HUGETLB_PAGE && X86
+
 config MEMFD_CREATE
 	def_bool TMPFS || HUGETLBFS
 
