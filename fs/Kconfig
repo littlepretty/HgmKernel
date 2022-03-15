@@ -246,6 +246,18 @@ config HUGETLBFS
 config HUGETLB_PAGE
 	def_bool HUGETLBFS
 
+config ARCH_WANT_HUGETLB_HIGH_GRANULARITY_MAPPING
+	bool
+
+config HUGETLB_HIGH_GRANULARITY_MAPPING
+	bool "HugeTLB high-granularity mapping support"
+	default n
+	depends on ARCH_WANT_HUGETLB_HIGH_GRANULARITY_MAPPING
+	help
+	  HugeTLB high-granularity mapping (HGM) allows userspace to issue
+	  UFFDIO_CONTINUE on HugeTLB mappings in PAGE_SIZE chunks.
+	  HGM is incompatible with the HugeTLB Vmemmap Optimization (HVO).
+
 #
 # Select this config option from the architecture Kconfig, if it is preferred
 # to enable the feature of HugeTLB Vmemmap Optimization (HVO).
@@ -257,6 +269,7 @@ config HUGETLB_PAGE_OPTIMIZE_VMEMMAP
 	def_bool HUGETLB_PAGE
 	depends on ARCH_WANT_HUGETLB_PAGE_OPTIMIZE_VMEMMAP
 	depends on SPARSEMEM_VMEMMAP
+	depends on !HUGETLB_HIGH_GRANULARITY_MAPPING
 
 config HUGETLB_PAGE_OPTIMIZE_VMEMMAP_DEFAULT_ON
 	bool "HugeTLB Vmemmap Optimization (HVO) defaults to on"
