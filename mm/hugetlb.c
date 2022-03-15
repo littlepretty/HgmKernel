@@ -69,6 +69,7 @@ struct hugetlb_vma_priv {
 	struct resv_map *resv_map;
 	// 0 means that double mapping is not enabled.
 	int double_mapped_shifts_num;
+	// Ordered by largest shift/size to smallest.
 	unsigned int *double_mapped_shifts;
 };
 
@@ -922,6 +923,21 @@ static void set_vma_private_resv_data(struct vm_area_struct *vma,
 	hvp = get_vma_private_data(vma);
 	hvp->resv_map = (void *)value;
 }
+
+#ifdef CONFIG_HUGETLB_DOUBLE_MAP
+bool hugetlb_doublemapped(struct vm_area_struct *vma)
+{
+	return get_vma_private_data(vma)->double_mapped_shifts_num > 0;
+}
+unsigned long hugetlb_doublemap_smallest_sz(struct vm_area_struct *vma)
+{
+	struct hugetlb_vma_priv *hvp = get_vma_private_data(vma);
+	if (!hugetlb_doublemapped(vma))
+		return huge_page_size(hstate_vma(vma));
+	return 1UL << hvp->double_mapped_shifts[
+			hvp->double_mapped_shifts_num - 1];
+}
+#endif
 
 static void
 resv_map_set_hugetlb_cgroup_uncharge_info(struct resv_map *resv_map,
@@ -5606,17 +5622,19 @@ static inline vm_fault_t hugetlb_handle_userfault(struct vm_area_struct *vma,
 static vm_fault_t hugetlb_no_page(struct mm_struct *mm,
 			struct vm_area_struct *vma,
 			struct address_space *mapping, pgoff_t idx,
-			unsigned long address, pte_t *ptep, unsigned int flags)
+			unsigned long address, struct hugetlb_pte *hpte, unsigned int flags)
 {
 	struct hstate *h = hstate_vma(vma);
 	vm_fault_t ret = VM_FAULT_SIGBUS;
 	int anon_rmap = 0;
 	unsigned long size;
-	struct page *page;
+	struct page *page, *subpage;
 	pte_t new_pte;
 	spinlock_t *ptl;
 	unsigned long haddr = address & huge_page_mask(h);
+	unsigned long haddr_alt = address & ~((1 << hpte->shift) - 1);
 	bool new_page, new_pagecache_page = false;
+	bool new_mapping = hpte->shift == huge_page_shift(h);
 
 	/*
 	 * Currently, we are forced to kill the process in the event the
@@ -5664,9 +5682,9 @@ retry:
 			 * here.  Before returning error, get ptl and make
 			 * sure there really is no pte entry.
 			 */
-			ptl = huge_pte_lock(h, mm, ptep);
+			ptl = huge_pte_lock_shift(hpte->shift, mm, hpte->ptep);
 			ret = 0;
-			if (huge_pte_none(huge_ptep_get(ptep)))
+			if (huge_pte_none(huge_ptep_get(hpte->ptep)))
 				ret = vmf_error(PTR_ERR(page));
 			spin_unlock(ptl);
 			goto out;
@@ -5706,10 +5724,12 @@ retry:
 
 		/* Check for page in userfault range. */
 		if (userfaultfd_minor(vma)) {
+			unsigned long userfault_address = hugetlb_doublemapped(vma)
+				? address : haddr;
 			unlock_page(page);
 			put_page(page);
 			ret = hugetlb_handle_userfault(vma, mapping, idx,
-						       flags, haddr,
+						       flags, userfault_address,
 						       VM_UFFD_MINOR);
 			goto out;
 		}
@@ -5730,24 +5750,28 @@ retry:
 		vma_end_reservation(h, vma, haddr);
 	}
 
-	ptl = huge_pte_lock(h, mm, ptep);
+	ptl = huge_pte_lock_shift(hpte->shift, mm, hpte->ptep);
 	ret = 0;
-	if (!huge_pte_none(huge_ptep_get(ptep)))
+	if (!huge_pte_none(huge_ptep_get(hpte->ptep)))
 		goto backout;
 
-	if (anon_rmap) {
-		ClearHPageRestoreReserve(page);
-		hugepage_add_new_anon_rmap(page, vma, haddr);
-	} else
-		page_dup_rmap(page, true);
-	new_pte = make_huge_pte(vma, page, ((vma->vm_flags & VM_WRITE)
+	if (new_mapping) {
+		if (anon_rmap) {
+			ClearHPageRestoreReserve(page);
+			hugepage_add_new_anon_rmap(page, vma, haddr);
+		} else
+			page_dup_rmap(page, true);
+	}
+
+	subpage = calculate_subpage(h, page, haddr_alt);
+	new_pte = make_huge_pte(vma, subpage, ((vma->vm_flags & VM_WRITE)
 				&& (vma->vm_flags & VM_SHARED)));
-	set_huge_pte_at(mm, haddr, ptep, new_pte);
+	set_huge_pte_at(mm, haddr_alt, hpte->ptep, new_pte);
 
 	hugetlb_count_add(pages_per_huge_page(h), mm);
 	if ((flags & FAULT_FLAG_WRITE) && !(vma->vm_flags & VM_SHARED)) {
 		/* Optimization, do the COW without a second fault */
-		ret = hugetlb_cow(mm, vma, address, ptep, page, ptl);
+		ret = hugetlb_cow(mm, vma, address, hpte->ptep, page, ptl);
 	}
 
 	spin_unlock(ptl);
@@ -5799,6 +5823,19 @@ u32 hugetlb_fault_mutex_hash(struct address_space *mapping, pgoff_t idx)
 }
 #endif
 
+static bool huge_pte_huge(pte_t entry, unsigned long sz) {
+	if (sz < PMD_SIZE)
+		return true;
+	if (sz < PUD_SIZE)
+		return pmd_huge(*(pmd_t*)&entry);
+	if (sz < P4D_SIZE)
+		return pud_huge(*(pud_t*)&entry);
+	if (sz < PGDIR_SIZE)
+		return p4d_huge(*(p4d_t*)&entry);
+	return pgd_huge(*(pgd_t*)&entry);
+}
+
+
 vm_fault_t hugetlb_fault(struct mm_struct *mm, struct vm_area_struct *vma,
 			unsigned long address, unsigned int flags)
 {
@@ -5807,12 +5844,14 @@ vm_fault_t hugetlb_fault(struct mm_struct *mm, struct vm_area_struct *vma,
 	vm_fault_t ret;
 	u32 hash;
 	pgoff_t idx;
-	struct page *page = NULL;
+	struct page *page;
 	struct page *pagecache_page = NULL;
 	struct hstate *h = hstate_vma(vma);
 	struct address_space *mapping;
 	int need_wait_lock = 0;
 	unsigned long haddr = address & huge_page_mask(h);
+	bool double_mapped = hugetlb_doublemapped(vma);
+	struct hugetlb_pte hpte;
 
 	ptep = huge_pte_offset(mm, haddr, huge_page_size(h));
 	if (ptep) {
@@ -5822,12 +5861,14 @@ vm_fault_t hugetlb_fault(struct mm_struct *mm, struct vm_area_struct *vma,
 		 * not actually modifying content here.
 		 */
 		entry = huge_ptep_get(ptep);
-		if (unlikely(is_hugetlb_entry_migration(entry))) {
-			migration_entry_wait_huge(vma, mm, ptep);
-			return 0;
-		} else if (unlikely(is_hugetlb_entry_hwpoisoned(entry)))
-			return VM_FAULT_HWPOISON_LARGE |
-				VM_FAULT_SET_HINDEX(hstate_index(h));
+		if (huge_pte_huge(entry, huge_page_size(h))) {
+			if (unlikely(is_hugetlb_entry_migration(entry))) {
+				migration_entry_wait_huge(vma, mm, ptep);
+				return 0;
+			} else if (unlikely(is_hugetlb_entry_hwpoisoned(entry)))
+				return VM_FAULT_HWPOISON_LARGE |
+					VM_FAULT_SET_HINDEX(hstate_index(h));
+		}
 	}
 
 	/*
@@ -5858,9 +5899,24 @@ vm_fault_t hugetlb_fault(struct mm_struct *mm, struct vm_area_struct *vma,
 	hash = hugetlb_fault_mutex_hash(mapping, idx);
 	mutex_lock(&hugetlb_fault_mutex_table[hash]);
 
-	entry = huge_ptep_get(ptep);
+	if (double_mapped) {
+		unsigned long desired_sz = hugetlb_doublemap_smallest_sz(vma);
+		huge_pte_alloc_high_granularity(&hpte, mm, vma,
+						address, desired_sz,
+						SPLIT_NONE, false);
+		if (!hpte.ptep) {
+			ret = VM_FAULT_OOM;
+			goto out_mutex;
+		}
+		ptep = hpte.ptep;
+	} else {
+		hpte.ptep = ptep;
+		hpte.shift = huge_page_shift(h);
+	}
+
+	entry = huge_ptep_get(hpte.ptep);
 	if (huge_pte_none(entry)) {
-		ret = hugetlb_no_page(mm, vma, mapping, idx, address, ptep, flags);
+		ret = hugetlb_no_page(mm, vma, mapping, idx, address, &hpte, flags);
 		goto out_mutex;
 	}
 
@@ -6835,7 +6891,8 @@ pte_t *huge_pte_alloc(struct mm_struct *mm, struct vm_area_struct *vma,
 				pte = (pte_t *)pmd_alloc(mm, pud, addr);
 		}
 	}
-	BUG_ON(pte && pte_present(*pte) && !pte_huge(*pte));
+	if (!hugetlb_doublemapped(vma))
+		BUG_ON(pte && pte_present(*pte) && !pte_huge(*pte));
 
 	return pte;
 }

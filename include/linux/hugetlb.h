@@ -1104,6 +1104,8 @@ int huge_pte_alloc_high_granularity(struct hugetlb_pte *hpte,
 				    unsigned int desired_sz,
 				    enum split_mode mode,
 				    bool write_locked);
+bool hugetlb_doublemapped(struct vm_area_struct *vma);
+unsigned long hugetlb_doublemap_smallest_sz(struct vm_area_struct *vma);
 #else
 static inline int huge_pte_alloc_high_granularity(struct hugetlb_pte *hpte,
 					   struct mm_struct *mm,
@@ -1114,6 +1116,15 @@ static inline int huge_pte_alloc_high_granularity(struct hugetlb_pte *hpte,
 					   bool write_locked)
 {
 	return -EINVAL;
+}
+static inline bool hugetlb_doublemapped(struct vm_area_struct *vma)
+{
+	return false;
+}
+static inline
+unsigned long hugetlb_doublemap_smallest_sz(struct vm_area_struct *vma)
+{
+	BUG();
 }
 #endif
 
