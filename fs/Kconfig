@@ -266,6 +266,13 @@ config HUGETLB_PAGE_OPTIMIZE_VMEMMAP_DEFAULT_ON
 	  enable HVO by default. It can be disabled via hugetlb_free_vmemmap=off
 	  (boot command line) or hugetlb_optimize_vmemmap (sysctl).
 
+config ARCH_HAS_SPECIAL_HUGETLB_HGM
+	bool
+
+config HUGETLB_HIGH_GRANULARITY_MAPPING
+	def_bool ARCH_WANT_GENERAL_HUGETLB || ARCH_HAS_SPECIAL_HUGETLB_HGM
+	depends on HUGETLB_PAGE
+
 config MEMFD_CREATE
 	def_bool TMPFS || HUGETLBFS
 
