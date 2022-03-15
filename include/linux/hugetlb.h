@@ -958,12 +958,11 @@ static inline gfp_t htlb_modify_alloc_mask(struct hstate *h, gfp_t gfp_mask)
 	return modified_mask;
 }
 
-static inline spinlock_t *huge_pte_lockptr(struct hstate *h,
+static inline spinlock_t *huge_pte_lockptr(unsigned int shift,
 					   struct mm_struct *mm, pte_t *pte)
 {
-	if (huge_page_size(h) == PMD_SIZE)
+	if (shift == PMD_SHIFT)
 		return pmd_lockptr(mm, (pmd_t *) pte);
-	VM_BUG_ON(huge_page_size(h) == PAGE_SIZE);
 	return &mm->page_table_lock;
 }
 
@@ -1173,7 +1172,7 @@ static inline gfp_t htlb_modify_alloc_mask(struct hstate *h, gfp_t gfp_mask)
 	return 0;
 }
 
-static inline spinlock_t *huge_pte_lockptr(struct hstate *h,
+static inline spinlock_t *huge_pte_lockptr(unsigned int shift,
 					   struct mm_struct *mm, pte_t *pte)
 {
 	return &mm->page_table_lock;
@@ -1230,7 +1229,7 @@ static inline spinlock_t *huge_pte_lock(struct hstate *h,
 {
 	spinlock_t *ptl;
 
-	ptl = huge_pte_lockptr(h, mm, pte);
+	ptl = huge_pte_lockptr(huge_page_shift(h), mm, pte);
 	spin_lock(ptl);
 	return ptl;
 }
