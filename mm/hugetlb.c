@@ -5176,7 +5176,7 @@ static void __unmap_hugepage_range(struct mmu_gather *tlb, struct vm_area_struct
 {
 	struct mm_struct *mm = vma->vm_mm;
 	unsigned long address;
-	pte_t *ptep;
+	struct hugetlb_pte hpte;
 	pte_t pte;
 	spinlock_t *ptl;
 	struct page *page;
@@ -5184,6 +5184,8 @@ static void __unmap_hugepage_range(struct mmu_gather *tlb, struct vm_area_struct
 	unsigned long sz = huge_page_size(h);
 	struct mmu_notifier_range range;
 	bool force_flush = false;
+	bool double_mapped = hugetlb_doublemapped(vma);
+	unsigned long smallest_sz = hugetlb_doublemap_smallest_sz(vma);
 
 	WARN_ON(!is_vm_hugetlb_page(vma));
 	BUG_ON(start & ~huge_page_mask(h));
@@ -5204,23 +5206,43 @@ static void __unmap_hugepage_range(struct mmu_gather *tlb, struct vm_area_struct
 	adjust_range_if_pmd_sharing_possible(vma, &range.start, &range.end);
 	mmu_notifier_invalidate_range_start(&range);
 	address = start;
-	for (; address < end; address += sz) {
-		ptep = huge_pte_offset(mm, address, sz);
-		if (!ptep)
-			continue;
 
-		ptl = huge_pte_lock(h, mm, ptep);
-		if (huge_pmd_unshare(mm, vma, &address, ptep)) {
-			spin_unlock(ptl);
-			tlb_flush_pmd_range(tlb, address & PUD_MASK, PUD_SIZE);
-			force_flush = true;
+	// All the hugetlb PTEs will be at the hugepage size if we aren't
+	// double-mapping. Do that work once.
+	if (!double_mapped)
+		hpte.shift = huge_page_shift(h);
+
+	while (address < end) {
+		pte_t *ptep = huge_pte_offset(mm, address, sz);
+		if (!ptep) {
+			// Make sure this didn't happen while servicing a
+			// double-mapped PTE.
+			BUG_ON(!IS_ALIGNED(address, sz));
+			address += sz;
 			continue;
 		}
 
-		pte = huge_ptep_get(ptep);
+		if (double_mapped) {
+			huge_pte_alloc_high_granularity(&hpte, mm, vma,
+							address, smallest_sz,
+							SPLIT_NEVER, false);
+			BUG_ON(!hpte.ptep);
+		} else
+			hpte.ptep = ptep;
+
+		ptl = huge_pte_lock_shift(hpte.shift, mm, hpte.ptep);
+		if (huge_pmd_unshare(mm, vma, &address, ptep)) {
+			BUG_ON(double_mapped);
+			spin_unlock(ptl);
+			tlb_flush_pmd_range(tlb, address & PUD_MASK, PUD_SIZE);
+			force_flush = true;
+			address += sz;
+			continue;
+		}
+
+		pte = huge_ptep_get(hpte.ptep);
 		if (huge_pte_none(pte)) {
 			spin_unlock(ptl);
-			continue;
 		}
 
 		/*
@@ -5228,8 +5250,9 @@ static void __unmap_hugepage_range(struct mmu_gather *tlb, struct vm_area_struct
 		 * unmapped and its refcount is dropped, so just clear pte here.
 		 */
 		if (unlikely(!pte_present(pte))) {
-			huge_pte_clear(mm, address, ptep, sz);
+			huge_pte_clear(mm, address, hptep.ptep, sz);
 			spin_unlock(ptl);
+			address += hugetlb_pte_size(&hpte);
 			continue;
 		}
 
@@ -5242,6 +5265,7 @@ static void __unmap_hugepage_range(struct mmu_gather *tlb, struct vm_area_struct
 		if (ref_page) {
 			if (page != ref_page) {
 				spin_unlock(ptl);
+				address += hugetlb_pte_size(&hpte);
 				continue;
 			}
 			/*
@@ -5252,21 +5276,27 @@ static void __unmap_hugepage_range(struct mmu_gather *tlb, struct vm_area_struct
 			set_vma_resv_flags(vma, HPAGE_RESV_UNMAPPED);
 		}
 
-		pte = huge_ptep_get_and_clear(mm, address, ptep);
-		tlb_remove_huge_tlb_entry(h, tlb, ptep, address);
+		pte = huge_ptep_get_and_clear(mm, address, hpte.ptep);
+		if (double_mapped)
+			tlb_change_page_size(tlb, hugetlb_pte_size(hpte.shift));
+		tlb_remove_huge_tlb_entry(tlb, hpte, address);
 		if (huge_pte_dirty(pte))
 			set_page_dirty(page);
 
-		hugetlb_count_sub(pages_per_huge_page(h), mm);
-		page_remove_rmap(page, true);
+		hugetlb_count_sub(hugetlb_pte_size(&hpte) / PAGE_SIZE, mm);
+
+		if (IS_ALIGNED(address, sz) && address + sz <= end)
+			page_remove_rmap(page, true);
 
 		spin_unlock(ptl);
-		tlb_remove_page_size(tlb, page, huge_page_size(h));
+		tlb_remove_page_size(tlb, page, hugetlb_pte_size(&hpte));
 		/*
 		 * Bail out after unmapping reference page if supplied
 		 */
 		if (ref_page)
 			break;
+
+		address += hugetlb_pte_size(&hpte);
 	}
 	mmu_notifier_invalidate_range_end(&range);
 	tlb_end_vma(tlb, vma);
@@ -6734,6 +6764,8 @@ bool want_pmd_share(struct vm_area_struct *vma, unsigned long addr)
 	if (uffd_disable_huge_pmd_share(vma))
 		return false;
 #endif
+	if (hugetlb_doublemapped(vma))
+		return false;
 	return vma_shareable(vma, addr);
 }
 
