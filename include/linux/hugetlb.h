@@ -165,7 +165,7 @@ unsigned long hugetlb_total_pages(void);
 vm_fault_t hugetlb_fault(struct mm_struct *mm, struct vm_area_struct *vma,
 			unsigned long address, unsigned int flags);
 #ifdef CONFIG_USERFAULTFD
-int hugetlb_mcopy_atomic_pte(struct mm_struct *dst_mm, pte_t *dst_pte,
+int hugetlb_mcopy_atomic_pte(struct mm_struct *dst_mm, struct hugetlb_pte *hpte,
 				struct vm_area_struct *dst_vma,
 				unsigned long dst_addr,
 				unsigned long src_addr,
@@ -1106,6 +1106,9 @@ int huge_pte_alloc_high_granularity(struct hugetlb_pte *hpte,
 				    bool write_locked);
 bool hugetlb_doublemapped(struct vm_area_struct *vma);
 unsigned long hugetlb_doublemap_smallest_sz(struct vm_area_struct *vma);
+int hugetlb_alloc_largest_pte(struct hugetlb_pte *hpte, struct mm_struct *mm,
+			      struct vm_area_struct *vma, unsigned long start,
+			      unsigned long end);
 #else
 static inline int huge_pte_alloc_high_granularity(struct hugetlb_pte *hpte,
 					   struct mm_struct *mm,
@@ -1123,6 +1126,13 @@ static inline bool hugetlb_doublemapped(struct vm_area_struct *vma)
 }
 static inline
 unsigned long hugetlb_doublemap_smallest_sz(struct vm_area_struct *vma)
+{
+	BUG();
+}
+static inline
+int hugetlb_alloc_largest_pte(struct hugetlb_pte *hpte, struct mm_struct *mm,
+			      struct vm_area_struct *vma, unsigned long start,
+			      unsigned long end)
 {
 	BUG();
 }

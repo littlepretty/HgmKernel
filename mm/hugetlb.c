@@ -6017,7 +6017,7 @@ out_mutex:
  * modifications for huge pages.
  */
 int hugetlb_mcopy_atomic_pte(struct mm_struct *dst_mm,
-			    pte_t *dst_pte,
+			    struct hugetlb_pte *hpte,
 			    struct vm_area_struct *dst_vma,
 			    unsigned long dst_addr,
 			    unsigned long src_addr,
@@ -6027,15 +6027,17 @@ int hugetlb_mcopy_atomic_pte(struct mm_struct *dst_mm,
 	bool is_continue = (mode == MCOPY_ATOMIC_CONTINUE);
 	struct hstate *h = hstate_vma(dst_vma);
 	struct address_space *mapping = dst_vma->vm_file->f_mapping;
+	unsigned long haddr = dst_addr & huge_page_mask(h);
 	pgoff_t idx = vma_hugecache_offset(h, dst_vma, dst_addr);
 	unsigned long size;
 	int vm_shared = dst_vma->vm_flags & VM_SHARED;
 	pte_t _dst_pte;
 	spinlock_t *ptl;
 	int ret = -ENOMEM;
-	struct page *page;
+	struct page *page, *subpage;
 	int writable;
 	bool page_in_pagecache = false;
+	bool new_mapping = hpte->shift == huge_page_shift(h);
 
 	if (is_continue) {
 		ret = -EFAULT;
@@ -6048,12 +6050,12 @@ int hugetlb_mcopy_atomic_pte(struct mm_struct *dst_mm,
 		 * a non-missing case. Return -EEXIST.
 		 */
 		if (vm_shared &&
-		    hugetlbfs_pagecache_present(h, dst_vma, dst_addr)) {
+		    hugetlbfs_pagecache_present(h, dst_vma, haddr)) {
 			ret = -EEXIST;
 			goto out;
 		}
 
-		page = alloc_huge_page(dst_vma, dst_addr, 0);
+		page = alloc_huge_page(dst_vma, haddr, 0);
 		if (IS_ERR(page)) {
 			ret = -ENOMEM;
 			goto out;
@@ -6069,13 +6071,13 @@ int hugetlb_mcopy_atomic_pte(struct mm_struct *dst_mm,
 			/* Free the allocated page which may have
 			 * consumed a reservation.
 			 */
-			restore_reserve_on_error(h, dst_vma, dst_addr, page);
+			restore_reserve_on_error(h, dst_vma, haddr, page);
 			put_page(page);
 
 			/* Allocate a temporary page to hold the copied
 			 * contents.
 			 */
-			page = alloc_huge_page_vma(h, dst_vma, dst_addr);
+			page = alloc_huge_page_vma(h, dst_vma, haddr);
 			if (!page) {
 				ret = -ENOMEM;
 				goto out;
@@ -6089,14 +6091,14 @@ int hugetlb_mcopy_atomic_pte(struct mm_struct *dst_mm,
 		}
 	} else {
 		if (vm_shared &&
-		    hugetlbfs_pagecache_present(h, dst_vma, dst_addr)) {
+		    hugetlbfs_pagecache_present(h, dst_vma, haddr)) {
 			put_page(*pagep);
 			ret = -EEXIST;
 			*pagep = NULL;
 			goto out;
 		}
 
-		page = alloc_huge_page(dst_vma, dst_addr, 0);
+		page = alloc_huge_page(dst_vma, haddr, 0);
 		if (IS_ERR(page)) {
 			ret = -ENOMEM;
 			*pagep = NULL;
@@ -6133,7 +6135,7 @@ int hugetlb_mcopy_atomic_pte(struct mm_struct *dst_mm,
 		page_in_pagecache = true;
 	}
 
-	ptl = huge_pte_lockptr(huge_page_shift(h), dst_mm, dst_pte);
+	ptl = huge_pte_lockptr(hpte->shift, dst_mm, hpte->ptep);
 	spin_lock(ptl);
 
 	/*
@@ -6151,14 +6153,16 @@ int hugetlb_mcopy_atomic_pte(struct mm_struct *dst_mm,
 		goto out_release_unlock;
 
 	ret = -EEXIST;
-	if (!huge_pte_none(huge_ptep_get(dst_pte)))
+	if (!huge_pte_none(huge_ptep_get(hpte->ptep)))
 		goto out_release_unlock;
 
-	if (vm_shared) {
-		page_dup_rmap(page, true);
-	} else {
-		ClearHPageRestoreReserve(page);
-		hugepage_add_new_anon_rmap(page, dst_vma, dst_addr);
+	if (new_mapping) {
+		if (vm_shared) {
+			page_dup_rmap(page, true);
+		} else {
+			ClearHPageRestoreReserve(page);
+			hugepage_add_new_anon_rmap(page, dst_vma, haddr);
+		}
 	}
 
 	/* For CONTINUE on a non-shared VMA, don't set VM_WRITE for CoW. */
@@ -6167,19 +6171,24 @@ int hugetlb_mcopy_atomic_pte(struct mm_struct *dst_mm,
 	else
 		writable = dst_vma->vm_flags & VM_WRITE;
 
-	_dst_pte = make_huge_pte(dst_vma, page, writable);
+	subpage = calculate_subpage(h, page, dst_addr);
+	if (subpage != page)
+		BUG_ON(!hugetlb_doublemapped(dst_vma));
+
+	_dst_pte = make_huge_pte(dst_vma, subpage, writable);
 	if (writable)
 		_dst_pte = huge_pte_mkdirty(_dst_pte);
 	_dst_pte = pte_mkyoung(_dst_pte);
 
-	set_huge_pte_at(dst_mm, dst_addr, dst_pte, _dst_pte);
+	set_huge_pte_at(dst_mm, dst_addr, hpte->ptep, _dst_pte);
 
-	(void)huge_ptep_set_access_flags(dst_vma, dst_addr, dst_pte, _dst_pte,
-					dst_vma->vm_flags & VM_WRITE);
-	hugetlb_count_add(pages_per_huge_page(h), dst_mm);
+	(void)huge_ptep_set_access_flags(dst_vma, dst_addr, hpte->ptep,
+					 _dst_pte,
+					 dst_vma->vm_flags & VM_WRITE);
+	hugetlb_count_add(hugetlb_pte_size(hpte) / PAGE_SIZE, dst_mm);
 
 	/* No need to invalidate - it was non-present before */
-	update_mmu_cache(dst_vma, dst_addr, dst_pte);
+	update_mmu_cache(dst_vma, dst_addr, hpte->ptep);
 
 	spin_unlock(ptl);
 	if (!is_continue)
@@ -6937,6 +6946,30 @@ pte_t *huge_pte_offset(struct mm_struct *mm,
 #endif /* CONFIG_ARCH_WANT_GENERAL_HUGETLB */
 
 #ifdef CONFIG_HUGETLB_DOUBLE_MAP
+int hugetlb_alloc_largest_pte(struct hugetlb_pte *hpte, struct mm_struct *mm,
+			      struct vm_area_struct *vma, unsigned long start,
+			      unsigned long end)
+{
+	struct hugetlb_vma_priv *hvp = get_vma_private_data(vma);
+	size_t shift_idx;
+	unsigned long smallest_sz = hugetlb_doublemap_smallest_sz(vma);
+	BUG_ON(!IS_ALIGNED(start, smallest_sz));
+	BUG_ON(!IS_ALIGNED(end, smallest_sz));
+	BUG_ON(hvp->double_mapped_shifts_num == 0);
+	for (shift_idx = 0; shift_idx < hvp->double_mapped_shifts_num;
+			++shift_idx) {
+		unsigned int shift = hvp->double_mapped_shifts[shift_idx];
+		unsigned long sz = 1UL << shift;
+		if (!IS_ALIGNED(start, sz) || start + sz > end)
+			continue;
+		huge_pte_alloc_high_granularity(hpte, mm, vma, start, sz,
+						SPLIT_ALWAYS, false);
+		BUG_ON(hpte->shift != shift);
+		return 0;
+	}
+	return -EINVAL;
+}
+
 int huge_pte_alloc_high_granularity(struct hugetlb_pte *hpte,
 				    struct mm_struct *mm,
 				    struct vm_area_struct *vma,
