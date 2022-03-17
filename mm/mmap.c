@@ -1041,6 +1041,9 @@ static inline int is_mergeable_vma(struct vm_area_struct *vma,
 	 * the kernel to generate new VMAs when old one could be
 	 * extended instead.
 	 */
+	// TODO: Actually compare the double-map sizes.
+	if (hugetlb_doublemapped(vma))
+		return 0;
 	if ((vma->vm_flags ^ vm_flags) & ~VM_SOFTDIRTY)
 		return 0;
 	if (vma->vm_file != file)
@@ -1579,7 +1582,7 @@ unsigned long do_mmap(struct file *file, unsigned long addr,
 			vm_flags |= VM_NORESERVE;
 	}
 
-	addr = mmap_region(file, addr, len, vm_flags, pgoff, uf);
+	addr = mmap_region(file, addr, len, vm_flags, pgoff, uf, flags);
 	if (!IS_ERR_VALUE(addr) &&
 	    ((vm_flags & VM_LOCKED) ||
 	     (flags & (MAP_POPULATE | MAP_NONBLOCK)) == MAP_POPULATE))
@@ -1721,7 +1724,7 @@ static inline int accountable_mapping(struct file *file, vm_flags_t vm_flags)
 
 unsigned long mmap_region(struct file *file, unsigned long addr,
 		unsigned long len, vm_flags_t vm_flags, unsigned long pgoff,
-		struct list_head *uf)
+		struct list_head *uf, unsigned long flags)
 {
 	struct mm_struct *mm = current->mm;
 	struct vm_area_struct *vma, *prev, *merge;
@@ -1826,6 +1829,17 @@ unsigned long mmap_region(struct file *file, unsigned long addr,
 		}
 
 		vm_flags = vma->vm_flags;
+
+#ifdef CONFIG_HUGETLB_DOUBLE_MAP
+		if (is_vm_hugetlb_page(vma) && flags & MAP_HUGETLB_DOUBLE_MAP) {
+			if (vm_flags & VM_SHARED)
+				hugetlb_doublemap_init(vma);
+			else {
+				error = -EINVAL;
+				goto unmap_and_free_vma;
+			}
+		}
+#endif
 	} else if (vm_flags & VM_SHARED) {
 		error = shmem_zero_setup(vma);
 		if (error)

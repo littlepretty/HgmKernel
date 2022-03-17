@@ -32,6 +32,7 @@
 #include <linux/cma.h>
 #include <linux/migrate.h>
 #include <linux/mman.h>
+#include <linux/sort.h>
 
 #include <asm/page.h>
 #include <asm/pgalloc.h>
@@ -925,6 +926,45 @@ static void set_vma_private_resv_data(struct vm_area_struct *vma,
 }
 
 #ifdef CONFIG_HUGETLB_DOUBLE_MAP
+static int compare_shifts(const void *a, const void *b)
+{
+	const int *shift_a = a;
+	const int *shift_b = b;
+	if (*shift_a < *shift_b)
+		return 1;
+	if (*shift_a > *shift_b)
+		return -1;
+	return 0;
+}
+void hugetlb_doublemap_init(struct vm_area_struct *vma)
+{
+	struct hugetlb_vma_priv *hvp = get_vma_private_data(vma);
+	unsigned int shift = huge_page_shift(hstate_vma(vma));
+	int shifts_num = 0;
+	int *shifts;
+	size_t idx;
+	struct hstate *h;
+	BUG_ON(!hvp);
+	BUG_ON(hvp->double_mapped_shifts);
+	for_each_hstate(h) {
+		if (huge_page_shift(h) <= shift)
+			shifts_num++;
+	}
+	shifts = kmalloc(sizeof(*shifts) * (shifts_num + 1), GFP_KERNEL);
+	BUG_ON(!shifts);
+	idx = 0;
+	for_each_hstate(h) {
+		if (huge_page_shift(h) <= shift)
+			shifts[idx++] = huge_page_shift(h);
+	}
+	shifts[idx++] = PAGE_SHIFT;
+
+	// Sort the shifts largest first.
+	sort(shifts, idx, sizeof(*shifts), compare_shifts, NULL);
+
+	hvp->double_mapped_shifts_num = idx;
+	hvp->double_mapped_shifts = shifts;
+}
 bool hugetlb_doublemapped(struct vm_area_struct *vma)
 {
 	return get_vma_private_data(vma)->double_mapped_shifts_num > 0;
@@ -5250,7 +5290,7 @@ static void __unmap_hugepage_range(struct mmu_gather *tlb, struct vm_area_struct
 		 * unmapped and its refcount is dropped, so just clear pte here.
 		 */
 		if (unlikely(!pte_present(pte))) {
-			huge_pte_clear(mm, address, hptep.ptep, sz);
+			huge_pte_clear(mm, address, hpte.ptep, sz);
 			spin_unlock(ptl);
 			address += hugetlb_pte_size(&hpte);
 			continue;
@@ -5278,7 +5318,7 @@ static void __unmap_hugepage_range(struct mmu_gather *tlb, struct vm_area_struct
 
 		pte = huge_ptep_get_and_clear(mm, address, hpte.ptep);
 		if (double_mapped)
-			tlb_change_page_size(tlb, hugetlb_pte_size(hpte.shift));
+			tlb_change_page_size(tlb, hugetlb_pte_size(&hpte));
 		tlb_remove_huge_tlb_entry(tlb, hpte, address);
 		if (huge_pte_dirty(pte))
 			set_page_dirty(page);

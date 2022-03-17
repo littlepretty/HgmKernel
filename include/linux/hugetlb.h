@@ -1097,6 +1097,7 @@ enum split_mode {
 	SPLIT_ALWAYS = SPLIT_NONE | SPLIT_PRESENT,
 };
 #ifdef CONFIG_HUGETLB_DOUBLE_MAP
+void hugetlb_doublemap_init(struct vm_area_struct *vma);
 int huge_pte_alloc_high_granularity(struct hugetlb_pte *hpte,
 				    struct mm_struct *mm,
 				    struct vm_area_struct *vma,
@@ -1110,6 +1111,9 @@ int hugetlb_alloc_largest_pte(struct hugetlb_pte *hpte, struct mm_struct *mm,
 			      struct vm_area_struct *vma, unsigned long start,
 			      unsigned long end);
 #else
+static inline void hugetlb_doublemap_init(struct vm_area_struct *vma)
+{
+}
 static inline int huge_pte_alloc_high_granularity(struct hugetlb_pte *hpte,
 					   struct mm_struct *mm,
 					   struct vm_area_struct *vma,
