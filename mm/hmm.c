@@ -473,7 +473,7 @@ out_unlock:
 #endif
 
 #ifdef CONFIG_HUGETLB_PAGE
-static int hmm_vma_walk_hugetlb_entry(pte_t *pte, unsigned long hmask,
+static int hmm_vma_walk_hugetlb_entry(struct hugetlb_pte *hpte,
 				      unsigned long start, unsigned long end,
 				      struct mm_walk *walk)
 {
@@ -487,8 +487,8 @@ static int hmm_vma_walk_hugetlb_entry(pte_t *pte, unsigned long hmask,
 	spinlock_t *ptl;
 	pte_t entry;
 
-	ptl = huge_pte_lock(hstate_vma(vma), walk->mm, pte);
-	entry = huge_ptep_get(pte);
+	ptl = huge_pte_lock_shift(hpte->shift, walk->mm, hpte->ptep);
+	entry = huge_ptep_get(hpte->ptep);
 
 	i = (start - range->start) >> PAGE_SHIFT;
 	pfn_req_flags = range->hmm_pfns[i];
@@ -501,7 +501,8 @@ static int hmm_vma_walk_hugetlb_entry(pte_t *pte, unsigned long hmask,
 		return hmm_vma_fault(addr, end, required_fault, walk);
 	}
 
-	pfn = pte_pfn(entry) + ((start & ~hmask) >> PAGE_SHIFT);
+	pfn = pte_pfn(entry) +
+		((start & ~hugetlb_pte_mask(hpte)) >> PAGE_SHIFT);
 	for (; addr < end; addr += PAGE_SIZE, i++, pfn++)
 		range->hmm_pfns[i] = pfn | cpu_flags;
 
