@@ -714,13 +714,13 @@ static void show_smap_vma_flags(struct seq_file *m, struct vm_area_struct *vma)
 }
 
 #ifdef CONFIG_HUGETLB_PAGE
-static int smaps_hugetlb_range(pte_t *pte, unsigned long hmask,
-				 unsigned long addr, unsigned long end,
-				 struct mm_walk *walk)
+static int smaps_hugetlb_range(struct hugetlb_pte *hpte, unsigned long addr,
+			       unsigned long end, struct mm_walk *walk)
 {
 	struct mem_size_stats *mss = walk->private;
 	struct vm_area_struct *vma = walk->vma;
 	struct page *page = NULL;
+	pte_t *pte = hpte->ptep;
 
 	if (pte_present(*pte)) {
 		page = vm_normal_page(vma, addr, *pte);
@@ -1533,7 +1533,7 @@ static int pagemap_pmd_range(pmd_t *pmdp, unsigned long addr, unsigned long end,
 
 #ifdef CONFIG_HUGETLB_PAGE
 /* This function walks within one hugetlb entry in the single call */
-static int pagemap_hugetlb_range(pte_t *ptep, unsigned long hmask,
+static int pagemap_hugetlb_range(struct hugetlb_pte *hpte,
 				 unsigned long addr, unsigned long end,
 				 struct mm_walk *walk)
 {
@@ -1546,7 +1546,8 @@ static int pagemap_hugetlb_range(pte_t *ptep, unsigned long hmask,
 	if (vma->vm_flags & VM_SOFTDIRTY)
 		flags |= PM_SOFT_DIRTY;
 
-	pte = huge_ptep_get(ptep);
+	pte = huge_ptep_get(hpte->ptep);
+	// FIXME: jthoughton@
 	if (pte_present(pte)) {
 		struct page *page = pte_page(pte);
 
@@ -1559,7 +1560,8 @@ static int pagemap_hugetlb_range(pte_t *ptep, unsigned long hmask,
 		flags |= PM_PRESENT;
 		if (pm->show_pfn)
 			frame = pte_pfn(pte) +
-				((addr & ~hmask) >> PAGE_SHIFT);
+				((addr & ~hugetlb_pte_mask(hpte))
+				 >> PAGE_SHIFT);
 	}
 
 	for (; addr != end; addr += PAGE_SIZE) {
@@ -1862,9 +1864,10 @@ static int gather_pte_stats(pmd_t *pmd, unsigned long addr,
 	return 0;
 }
 #ifdef CONFIG_HUGETLB_PAGE
-static int gather_hugetlb_stats(pte_t *pte, unsigned long hmask,
-		unsigned long addr, unsigned long end, struct mm_walk *walk)
+static int gather_hugetlb_stats(struct hugetlb_pte *hpte, unsigned long addr,
+				unsigned long end, struct mm_walk *walk)
 {
+	pte_t *pte = hpte->ptep;
 	pte_t huge_pte = huge_ptep_get(pte);
 	struct numa_maps *md;
 	struct page *page;
@@ -1877,7 +1880,8 @@ static int gather_hugetlb_stats(pte_t *pte, unsigned long hmask,
 		return 0;
 
 	md = walk->private;
-	gather_stats(page, md, pte_dirty(huge_pte), 1);
+	// FIXME: jthoughton@ is compound_head correct?
+	gather_stats(compound_head(page), md, pte_dirty(huge_pte), 1);
 	return 0;
 }
 

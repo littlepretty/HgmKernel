@@ -564,7 +564,7 @@ static int queue_pages_pte_range(pmd_t *pmd, unsigned long addr,
 	return addr != end ? -EIO : 0;
 }
 
-static int queue_pages_hugetlb(pte_t *pte, unsigned long hmask,
+static int queue_pages_hugetlb(struct hugetlb_pte *hpte,
 			       unsigned long addr, unsigned long end,
 			       struct mm_walk *walk)
 {
@@ -576,13 +576,15 @@ static int queue_pages_hugetlb(pte_t *pte, unsigned long hmask,
 	spinlock_t *ptl;
 	pte_t entry;
 
-	ptl = huge_pte_lock(hstate_vma(walk->vma), walk->mm, pte);
-	entry = huge_ptep_get(pte);
+	ptl = huge_pte_lock_shift(hpte->shift, walk->mm, hpte->ptep);
+	entry = huge_ptep_get(hpte->ptep);
 	if (!pte_present(entry))
 		goto unlock;
 	page = pte_page(entry);
 	if (!queue_pages_required(page, qp))
 		goto unlock;
+
+	// FIXME: jthoughton fix this function to do the right thing.
 
 	if (flags == MPOL_MF_STRICT) {
 		/*
