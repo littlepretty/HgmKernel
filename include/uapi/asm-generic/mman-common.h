@@ -76,6 +76,8 @@
 #define MADV_POPULATE_READ	22	/* populate (prefault) page tables readable */
 #define MADV_POPULATE_WRITE	23	/* populate (prefault) page tables writable */
 
+#define MADV_COLLAPSE	24		/* attempt to use huge PTEs */
+
 /* compatibility flags */
 #define MAP_FILE	0
 

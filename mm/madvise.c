@@ -57,6 +57,7 @@ static int madvise_need_mmap_write(int behavior)
 	case MADV_FREE:
 	case MADV_POPULATE_READ:
 	case MADV_POPULATE_WRITE:
+	case MADV_COLLAPSE:
 		return 0;
 	default:
 		/* be safe, default to 1. list exceptions explicitly */
@@ -937,6 +938,21 @@ static long madvise_remove(struct vm_area_struct *vma,
 }
 
 /*
+ * Attempt to use huge PTEs for this address range.
+ */
+static long madvise_collapse(struct vm_area_struct *vma,
+			     struct vm_area_struct **prev,
+			     unsigned long start, unsigned long end)
+{
+	*prev = vma;
+
+	if (!is_vm_hugetlb_page(vma))
+		return -EINVAL;
+
+	return collapse_hugetlb_range(vma, start, end);
+}
+
+/*
  * Apply an madvise behavior to a region of a vma.  madvise_update_vma
  * will handle splitting a vm area into separate areas, each area with its own
  * behavior.
@@ -959,6 +975,8 @@ static int madvise_vma_behavior(struct vm_area_struct *vma,
 		return madvise_cold(vma, prev, start, end);
 	case MADV_PAGEOUT:
 		return madvise_pageout(vma, prev, start, end);
+	case MADV_COLLAPSE:
+		return madvise_collapse(vma, prev, start, end);
 	case MADV_FREE:
 	case MADV_DONTNEED:
 		return madvise_dontneed_free(vma, prev, start, end, behavior);
@@ -1109,6 +1127,9 @@ madvise_behavior_valid(int behavior)
 #ifdef CONFIG_MEMORY_FAILURE
 	case MADV_SOFT_OFFLINE:
 	case MADV_HWPOISON:
+#endif
+#ifdef CONFIG_HUGETLB_DOUBLE_MAP
+	case MADV_COLLAPSE:
 #endif
 		return true;
 
