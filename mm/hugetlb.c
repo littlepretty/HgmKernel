@@ -4989,6 +4989,10 @@ int copy_hugetlb_page_range(struct mm_struct *dst, struct mm_struct *src,
 	struct mmu_notifier_range range;
 	int ret = 0;
 
+	if (!(vma->vm_flags & VM_SHARED) && hugetlb_doublemapped(vma)) {
+		return -EINVAL;
+	}
+
 	if (cow) {
 		mmu_notifier_range_init(&range, MMU_NOTIFY_CLEAR, 0, vma, src,
 					vma->vm_start,
