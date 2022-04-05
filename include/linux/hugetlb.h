@@ -1182,6 +1182,19 @@ static inline __init void hugetlb_cma_check(void)
 }
 #endif
 
+#if defined(CONFIG_HUGETLB_DOUBLE_MAP) && defined(CONFIG_MEMORY_FAILURE)
+void hugetlb_double_map_and_poison(struct vm_area_struct *vma,
+				   struct page *page,
+				   unsigned long addr, pte_t pte);
+#else
+static inline
+void hugetlb_double_map_and_poison(struct vm_area_struct *vma,
+				   struct page *page,
+				   unsigned long addr, pte_t pte)
+{
+}
+#endif
+
 bool want_pmd_share(struct vm_area_struct *vma, unsigned long addr);
 
 #ifndef __HAVE_ARCH_FLUSH_HUGETLB_TLB_RANGE

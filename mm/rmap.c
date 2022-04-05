@@ -1430,9 +1430,14 @@ static bool try_to_unmap_one(struct page *page, struct vm_area_struct *vma,
 	};
 	pte_t pteval;
 	struct page *subpage;
+	// struct page *hpage = compound_head(page);
 	bool ret = true;
 	struct mmu_notifier_range range;
 	enum ttu_flags flags = (enum ttu_flags)(long)arg;
+	bool double_mapping_possible = false;
+#ifdef CONFIG_HUGETLB_DOUBLE_MAP
+	double_mapping_possible = PageHuge(page);
+#endif
 
 	/*
 	 * When racing against e.g. zap_pte_range() on another cpu,
@@ -1494,6 +1499,7 @@ static bool try_to_unmap_one(struct page *page, struct vm_area_struct *vma,
 		subpage = page - page_to_pfn(page) + pte_pfn(*pvmw.pte);
 		address = pvmw.address;
 
+		// TODO: jthoughton potential double-mapping changes needed.
 		if (PageHuge(page) && !PageAnon(page)) {
 			/*
 			 * To call huge_pmd_unshare, i_mmap_rwsem must be
@@ -1556,10 +1562,14 @@ static bool try_to_unmap_one(struct page *page, struct vm_area_struct *vma,
 		if (PageHWPoison(page) && !(flags & TTU_IGNORE_HWPOISON)) {
 			pteval = swp_entry_to_pte(make_hwpoison_entry(subpage));
 			if (PageHuge(page)) {
+#ifdef CONFIG_HUGETLB_DOUBLE_MAP
+				hugetlb_double_map_and_poison(vma, subpage, address, pteval);
+#else
 				hugetlb_count_sub(compound_nr(page), mm);
 				set_huge_swap_pte_at(mm, address,
 						     pvmw.pte, pteval,
 						     vma_mmu_pagesize(vma));
+#endif
 			} else {
 				dec_mm_counter(mm, mm_counter(page));
 				set_pte_at(mm, address, pvmw.pte, pteval);
@@ -1668,7 +1678,9 @@ discard:
 		 *
 		 * See Documentation/vm/mmu_notifier.rst
 		 */
-		page_remove_rmap(subpage, PageHuge(page));
+		if (!double_mapping_possible)
+			page_remove_rmap(subpage, PageHuge(page));
+
 		put_page(page);
 	}
 

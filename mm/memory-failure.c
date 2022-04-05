@@ -660,15 +660,14 @@ out:
 }
 
 #ifdef CONFIG_HUGETLB_PAGE
-static int hwpoison_hugetlb_range(pte_t *ptep, unsigned long hmask,
+static int hwpoison_hugetlb_range(struct hugetlb_pte *hpte,
 			    unsigned long addr, unsigned long end,
 			    struct mm_walk *walk)
 {
 	struct hwp_walk *hwp = (struct hwp_walk *)walk->private;
-	pte_t pte = huge_ptep_get(ptep);
-	struct hstate *h = hstate_vma(walk->vma);
+	pte_t pte = huge_ptep_get(hpte->ptep);
 
-	return check_hwpoisoned_entry(pte, addr, huge_page_shift(h),
+	return check_hwpoisoned_entry(pte, addr, hpte->shift,
 				      hwp->pfn, &hwp->tk);
 }
 #else
@@ -1345,29 +1344,30 @@ static int get_hwpoison_page(struct page *p, unsigned long flags)
  * the pages and send SIGBUS to the processes if the data was dirty.
  */
 static bool hwpoison_user_mappings(struct page *p, unsigned long pfn,
-				  int flags, struct page *hpage)
+				  int flags, struct page *poisoned)
 {
 	enum ttu_flags ttu = TTU_IGNORE_MLOCK | TTU_SYNC;
 	struct address_space *mapping;
 	LIST_HEAD(tokill);
 	bool unmap_success;
 	int kill = 1, forcekill;
-	bool mlocked = PageMlocked(hpage);
-
+	bool mlocked = PageMlocked(poisoned);
+	struct page *head = compound_head(poisoned);
+	bool use_double_map = poisoned == p && PageHuge(head);
 	/*
 	 * Here we are interested only in user-mapped pages, so skip any
 	 * other types of pages.
 	 */
 	if (PageReserved(p) || PageSlab(p))
 		return true;
-	if (!(PageLRU(hpage) || PageHuge(p)))
+	if (!(PageLRU(poisoned) || PageHuge(p)))
 		return true;
 
 	/*
 	 * This check implies we don't kill processes if their pages
 	 * are in the swap cache early. Those are always late kills.
 	 */
-	if (!page_mapped(hpage))
+	if (!use_double_map && !page_mapped(poisoned))
 		return true;
 
 	if (PageKsm(p)) {
@@ -1387,11 +1387,11 @@ static bool hwpoison_user_mappings(struct page *p, unsigned long pfn,
 	 * XXX: the dirty test could be racy: set_page_dirty() may not always
 	 * be called inside page lock (it's recommended but not enforced).
 	 */
-	mapping = page_mapping(hpage);
-	if (!(flags & MF_MUST_KILL) && !PageDirty(hpage) && mapping &&
+	mapping = page_mapping(poisoned);
+	if (!(flags & MF_MUST_KILL) && !PageDirty(poisoned) && mapping &&
 	    mapping_can_writeback(mapping)) {
-		if (page_mkclean(hpage)) {
-			SetPageDirty(hpage);
+		if (page_mkclean(poisoned)) {
+			SetPageDirty(poisoned);
 		} else {
 			kill = 0;
 			ttu |= TTU_IGNORE_HWPOISON;
@@ -1409,12 +1409,12 @@ static bool hwpoison_user_mappings(struct page *p, unsigned long pfn,
 	 * there's nothing that can be done.
 	 */
 	if (kill)
-		collect_procs(hpage, &tokill, flags & MF_ACTION_REQUIRED);
+		collect_procs(poisoned, &tokill, flags & MF_ACTION_REQUIRED);
 
-	if (!PageHuge(hpage)) {
-		try_to_unmap(hpage, ttu);
+	if (!PageHuge(poisoned)) {
+		try_to_unmap(poisoned, ttu);
 	} else {
-		if (!PageAnon(hpage)) {
+		if (!PageAnon(poisoned)) {
 			/*
 			 * For hugetlb pages in shared mappings, try_to_unmap
 			 * could potentially call huge_pmd_unshare.  Because of
@@ -1422,28 +1422,32 @@ static bool hwpoison_user_mappings(struct page *p, unsigned long pfn,
 			 * TTU_RMAP_LOCKED to indicate we have taken the lock
 			 * at this higher level.
 			 */
-			mapping = hugetlb_page_mapping_lock_write(hpage);
+			mapping = hugetlb_page_mapping_lock_write(head);
 			if (mapping) {
-				try_to_unmap(hpage, ttu|TTU_RMAP_LOCKED);
+				try_to_unmap(poisoned, ttu|TTU_RMAP_LOCKED);
 				i_mmap_unlock_write(mapping);
 			} else
 				pr_info("Memory failure: %#lx: could not lock mapping for mapped huge page\n", pfn);
 		} else {
-			try_to_unmap(hpage, ttu);
+			try_to_unmap(poisoned, ttu);
 		}
 	}
 
-	unmap_success = !page_mapped(hpage);
-	if (!unmap_success)
-		pr_err("Memory failure: %#lx: failed to unmap page (mapcount=%d)\n",
-		       pfn, page_mapcount(hpage));
+	if (!use_double_map) {
+		unmap_success = !page_mapped(poisoned);
+		if (!unmap_success)
+			pr_err("Memory failure: %#lx: failed to unmap page (mapcount=%d)\n",
+			       pfn, page_mapcount(poisoned));
+	} else
+		// Just assume that the unmap worked.
+		unmap_success = true;
 
 	/*
 	 * try_to_unmap() might put mlocked page in lru cache, so call
 	 * shake_page() again to ensure that it's flushed.
 	 */
 	if (mlocked)
-		shake_page(hpage);
+		shake_page(poisoned);
 
 	/*
 	 * Now that the dirty bit has been propagated to the
@@ -1455,7 +1459,7 @@ static bool hwpoison_user_mappings(struct page *p, unsigned long pfn,
 	 * use a more force-full uncatchable kill to prevent
 	 * any accesses to the poisoned memory.
 	 */
-	forcekill = PageDirty(hpage) || (flags & MF_MUST_KILL);
+	forcekill = PageDirty(poisoned) || (flags & MF_MUST_KILL);
 	kill_procs(&tokill, forcekill, !unmap_success, pfn, flags);
 
 	return unmap_success;
@@ -1506,13 +1510,23 @@ static int memory_failure_hugetlb(unsigned long pfn, int flags)
 	struct page *head = compound_head(p);
 	int res;
 	unsigned long page_flags;
+	struct page *poisoned;
 
-	if (TestSetPageHWPoison(head)) {
+#ifdef CONFIG_HUGETLB_DOUBLE_MAP
+	poisoned = p;
+	SetPageHasHWPoisoned(head);
+	// TODO: jthoughton: realloc the page structs here.
+#else
+	poisoned = head;
+#endif
+
+	if (TestSetPageHWPoison(poisoned)) {
 		pr_err("Memory failure: %#lx: already hardware poisoned\n",
 		       pfn);
 		res = -EHWPOISON;
 		if (flags & MF_ACTION_REQUIRED)
-			res = kill_accessing_process(current, page_to_pfn(head), flags);
+			res = kill_accessing_process(current, page_to_pfn(poisoned),
+						     flags);
 		return res;
 	}
 
@@ -1521,14 +1535,14 @@ static int memory_failure_hugetlb(unsigned long pfn, int flags)
 	if (!(flags & MF_COUNT_INCREASED)) {
 		res = get_hwpoison_page(p, flags);
 		if (!res) {
-			lock_page(head);
+			lock_page(poisoned);
 			if (hwpoison_filter(p)) {
-				if (TestClearPageHWPoison(head))
+				if (TestClearPageHWPoison(poisoned))
 					num_poisoned_pages_dec();
-				unlock_page(head);
+				unlock_page(poisoned);
 				return 0;
 			}
-			unlock_page(head);
+			unlock_page(poisoned);
 			res = MF_FAILED;
 			if (__page_handle_poison(p)) {
 				page_ref_inc(p);
@@ -1542,9 +1556,10 @@ static int memory_failure_hugetlb(unsigned long pfn, int flags)
 		}
 	}
 
-	lock_page(head);
-	page_flags = head->flags;
+	lock_page(poisoned);
+	page_flags = poisoned->flags;
 
+#ifndef CONFIG_HUGETLB_DOUBLE_MAP
 	/*
 	 * TODO: hwpoison for pud-sized hugetlb doesn't work right now, so
 	 * simply disable it. In order to make it work properly, we need
@@ -1559,8 +1574,8 @@ static int memory_failure_hugetlb(unsigned long pfn, int flags)
 		res = -EBUSY;
 		goto out;
 	}
-
-	if (!hwpoison_user_mappings(p, pfn, flags, head)) {
+#endif
+	if (!hwpoison_user_mappings(p, pfn, flags, poisoned)) {
 		action_result(pfn, MF_MSG_UNMAP_FAILED, MF_IGNORED);
 		res = -EBUSY;
 		goto out;

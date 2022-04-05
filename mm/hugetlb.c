@@ -7533,3 +7533,26 @@ void __init hugetlb_cma_check(void)
 }
 
 #endif /* CONFIG_CMA */
+
+#if defined(CONFIG_HUGETLB_DOUBLE_MAP) && defined(CONFIG_MEMORY_FAILURE)
+void hugetlb_double_map_and_poison(struct vm_area_struct *vma,
+				   struct page *page,
+				   unsigned long addr, pte_t pte)
+{
+	struct mm_struct *mm = vma->vm_mm;
+	struct hugetlb_pte hpte;
+	int ret;
+	if (!hugetlb_doublemapped(vma))
+		hugetlb_doublemap_init(vma);
+
+	ret = huge_pte_alloc_high_granularity(&hpte, mm, vma, addr,
+					      PAGE_SIZE, SPLIT_ALWAYS, true);
+	// TODO: fix these
+	BUG_ON(ret);
+	BUG_ON(hpte.shift != PAGE_SHIFT);
+	BUG_ON(!hpte.ptep);
+	set_huge_swap_pte_at(mm, addr, hpte.ptep, pte,
+			     hugetlb_pte_size(&hpte));
+	hugetlb_count_sub(hugetlb_pte_size(&hpte) / PAGE_SIZE, mm);
+}
+#endif
