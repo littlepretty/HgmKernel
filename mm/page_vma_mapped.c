@@ -165,20 +165,37 @@ bool page_vma_mapped_walk(struct page_vma_mapped_walk *pvmw)
 		return not_found(pvmw);
 
 	if (unlikely(PageHuge(page))) {
+		unsigned int shift;
+		struct hugetlb_pte hpte;
 		/* The only possible mapping was handled on last iteration */
 		if (pvmw->pte)
 			return not_found(pvmw);
 
 		/* when pud is not present, pte will be NULL */
+#ifdef CONFIG_HUGETLB_DOUBLE_MAP
+		pr_err("!!! hpahg\n");
+		huge_pte_alloc_high_granularity(&hpte, mm, pvmw->vma,
+				pvmw->address, PAGE_SIZE, SPLIT_NEVER, true);
+		pvmw->pte = hpte.ptep;
+		shift = hpte.shift;
+#else
 		pvmw->pte = huge_pte_offset(mm, pvmw->address, page_size(page));
-		if (!pvmw->pte)
+		shift = huge_page_shift(page_hstate(page));
+#endif
+		if (!pvmw->pte) {
+			pr_err("!!! pvmw: returning false\n");
 			return false;
+		}
 
-		pvmw->ptl = huge_pte_lockptr(huge_page_shift(page_hstate(page)),
-					     mm, pvmw->pte);
+		pvmw->ptl = huge_pte_lockptr(shift, mm, pvmw->pte);
 		spin_lock(pvmw->ptl);
-		if (!check_pte(pvmw))
-			return not_found(pvmw);
+		if (!check_pte(pvmw)) {
+			pr_err("!!! pvmw: returning not_found\n");
+			bool ret = not_found(pvmw);
+			pr_err("!!! not found: %d\n", ret);
+			return ret;
+		}
+		pr_err("!!! pvmw: done\n");
 		return true;
 	}
 

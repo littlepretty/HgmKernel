@@ -5830,11 +5830,17 @@ retry:
 		goto backout;
 
 	if (new_mapping) {
+		pr_err("A new mapping\n");
 		if (anon_rmap) {
+			pr_err("anon rmap\n");
 			ClearHPageRestoreReserve(page);
 			hugepage_add_new_anon_rmap(page, vma, haddr);
-		} else
+		} else {
+			pr_err("compound new mapping\n");
 			page_dup_rmap(page, true);
+		}
+	} else {
+		pr_err("Not a new mapping\n");
 	}
 
 	subpage = calculate_subpage(h, page, haddr_alt);
@@ -5977,7 +5983,7 @@ vm_fault_t hugetlb_fault(struct mm_struct *mm, struct vm_area_struct *vma,
 		unsigned long desired_sz = hugetlb_doublemap_smallest_sz(vma);
 		huge_pte_alloc_high_granularity(&hpte, mm, vma,
 						address, desired_sz,
-						SPLIT_NONE, false);
+						SPLIT_NEVER, false);
 		if (!hpte.ptep) {
 			ret = VM_FAULT_OOM;
 			goto out_mutex;
@@ -7534,3 +7540,26 @@ void __init hugetlb_cma_check(void)
 }
 
 #endif /* CONFIG_CMA */
+
+#if defined(CONFIG_HUGETLB_DOUBLE_MAP) && defined(CONFIG_MEMORY_FAILURE)
+void hugetlb_double_map_and_poison(struct vm_area_struct *vma,
+				   struct page *page,
+				   unsigned long addr, pte_t pte)
+{
+	struct mm_struct *mm = vma->vm_mm;
+	struct hugetlb_pte hpte;
+	int ret;
+	if (!hugetlb_doublemapped(vma))
+		hugetlb_doublemap_init(vma);
+
+	ret = huge_pte_alloc_high_granularity(&hpte, mm, vma, addr,
+					      PAGE_SIZE, SPLIT_ALWAYS, true);
+	// TODO: fix these
+	BUG_ON(ret);
+	BUG_ON(hpte.shift != PAGE_SHIFT);
+	BUG_ON(!hpte.ptep);
+	set_huge_swap_pte_at(mm, addr, hpte.ptep, pte,
+			     hugetlb_pte_size(&hpte));
+	hugetlb_count_sub(hugetlb_pte_size(&hpte) / PAGE_SIZE, mm);
+}
+#endif

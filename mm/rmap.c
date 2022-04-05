@@ -1430,9 +1430,16 @@ static bool try_to_unmap_one(struct page *page, struct vm_area_struct *vma,
 	};
 	pte_t pteval;
 	struct page *subpage;
+	struct page *hpage = compound_head(page);
 	bool ret = true;
 	struct mmu_notifier_range range;
 	enum ttu_flags flags = (enum ttu_flags)(long)arg;
+	bool double_mapping_possible = false;
+#ifdef CONFIG_HUGETLB_DOUBLE_MAP
+	double_mapping_possible = PageHuge(hpage);
+#endif
+
+	BUG_ON(!double_mapping_possible && hpage != page);
 
 	/*
 	 * When racing against e.g. zap_pte_range() on another cpu,
@@ -1454,11 +1461,11 @@ static bool try_to_unmap_one(struct page *page, struct vm_area_struct *vma,
 	 * Note that the page can not be free in this function as call of
 	 * try_to_unmap() must hold a reference on the page.
 	 */
-	range.end = PageKsm(page) ?
+	range.end = PageKsm(hpage) ?
 			address + PAGE_SIZE : vma_address_end(page, vma);
 	mmu_notifier_range_init(&range, MMU_NOTIFY_CLEAR, 0, vma, vma->vm_mm,
 				address, range.end);
-	if (PageHuge(page)) {
+	if (PageHuge(hpage)) {
 		/*
 		 * If sharing is possible, start and end will be adjusted
 		 * accordingly.
@@ -1494,7 +1501,8 @@ static bool try_to_unmap_one(struct page *page, struct vm_area_struct *vma,
 		subpage = page - page_to_pfn(page) + pte_pfn(*pvmw.pte);
 		address = pvmw.address;
 
-		if (PageHuge(page) && !PageAnon(page)) {
+		// TODO: jthoughton potential double-mapping changes needed.
+		if (PageHuge(hpage) && !PageAnon(hpage)) {
 			/*
 			 * To call huge_pmd_unshare, i_mmap_rwsem must be
 			 * held in write mode.  Caller needs to explicitly
@@ -1548,18 +1556,24 @@ static bool try_to_unmap_one(struct page *page, struct vm_area_struct *vma,
 
 		/* Move the dirty bit to the page. Now the pte is gone. */
 		if (pte_dirty(pteval))
-			set_page_dirty(page);
+			set_page_dirty(hpage);
 
 		/* Update high watermark before we lower rss */
 		update_hiwater_rss(mm);
 
-		if (PageHWPoison(page) && !(flags & TTU_IGNORE_HWPOISON)) {
+		if (PageHWPoison(subpage) && !(flags & TTU_IGNORE_HWPOISON)) {
+			pr_err("Memory failure !!!: Preparing swp hwpoison entry\n");
 			pteval = swp_entry_to_pte(make_hwpoison_entry(subpage));
-			if (PageHuge(page)) {
+			if (PageHuge(hpage)) {
+#ifdef CONFIG_HUGETLB_DOUBLE_MAP
+				pr_err("Memory failure !!!: Doing double-map and poison\n");
+				hugetlb_double_map_and_poison(vma, subpage, address, pteval);
+#else
 				hugetlb_count_sub(compound_nr(page), mm);
 				set_huge_swap_pte_at(mm, address,
 						     pvmw.pte, pteval,
 						     vma_mmu_pagesize(vma));
+#endif
 			} else {
 				dec_mm_counter(mm, mm_counter(page));
 				set_pte_at(mm, address, pvmw.pte, pteval);
@@ -1668,7 +1682,9 @@ discard:
 		 *
 		 * See Documentation/vm/mmu_notifier.rst
 		 */
-		page_remove_rmap(subpage, PageHuge(page));
+		if (!double_mapping_possible)
+			page_remove_rmap(subpage, PageHuge(hpage));
+
 		put_page(page);
 	}
 

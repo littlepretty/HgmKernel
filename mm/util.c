@@ -665,12 +665,17 @@ bool folio_mapped(struct folio *folio)
 {
 	long i, nr;
 
-	if (!folio_test_large(folio))
+	if (!folio_test_large(folio)) {
 		return atomic_read(&folio->_mapcount) >= 0;
-	if (atomic_read(folio_mapcount_ptr(folio)) >= 0)
+	}
+	if (atomic_read(folio_mapcount_ptr(folio)) >= 0) {
+		pr_err("!!! Checking folio mapcount ptr\n");
 		return true;
-	if (folio_test_hugetlb(folio))
+	}
+	if (folio_test_hugetlb(folio)) {
+		pr_err("!!! Checking folio hugetlb\n");
 		return false;
+	}
 
 	nr = folio_nr_pages(folio);
 	for (i = 0; i < nr; i++) {
