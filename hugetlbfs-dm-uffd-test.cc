@@ -209,16 +209,20 @@ int main(void) {
 	puts("second page populated successfully!");
 
 	// Collapse is still buggy.
-	// puts("about to collapse")
-	// madvise(primary_map, len, MADV_COLLAPSE);
+	puts("about to collapse");
+	if (madvise(primary_map, len, MADV_COLLAPSE) < 0) {
+		perror("collapse failed");
+		BUG("collapse failed");
+	}
+	puts("collapse done");
 
-	// if (*primary_map != 'a') {
-	// 	BUG("got invalid value after collapse");
-	// }
+	if (*primary_map != 'a') {
+		BUG("got invalid value after collapse");
+	}
 
-	// if (*(primary_map + 4096 * 2) != '\0') {
-	// 	BUG("did not get zero bytes");
-	// }
+	if (*(primary_map + 4096 * 2) != '\0') {
+		BUG("did not get zero bytes");
+	}
 
 	write(pipefds[1], "", 1);
 

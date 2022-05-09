@@ -1026,8 +1026,11 @@ int collapse_hugetlb_range(struct vm_area_struct *vma,
 	tlb_gather_mmu(&tlb, mm);
 
 	current_addr = start;
+
+	pr_err("!!! collapsing %lx...\n", current_addr);
 restart:
 	for (shift_idx = 0; shift_idx < priv->double_mapped_shifts_num; ++shift_idx) {
+		pr_err("!!! collapsing %lx...\n", current_addr);
 		unsigned int shift = priv->double_mapped_shifts[shift_idx];
 		unsigned long sz = 1 << shift;
 		struct hugetlb_pte hpte;
@@ -1051,23 +1054,28 @@ restart:
 		BUG_ON(ret);
 		if (hpte.shift > shift) {
 			current_addr += (1 << hpte.shift);
+			pr_err("!!! restart hpte.shift > shift: %lx\n", current_addr);
 			goto restart;
 		}
 
 		BUG_ON(hpte.shift != shift);
 
+		pr_err("!!! locking: %lx\n", current_addr);
 		ptl = huge_pte_lock_shift(hpte.shift, mm, hpte.ptep);
 		entry = huge_ptep_get(hpte.ptep);
 
 		if (huge_pte_none(entry) || pte_none(entry)) {
 			current_addr += sz;
+			pr_err("!!! restart, pte none: %lx\n", current_addr);
 			spin_unlock(ptl);
 			goto restart;
 		}
 
 		idx = vma_hugecache_offset(h, vma, current_addr);
+		pr_err("!!! locking page: %lx\n", current_addr);
 		hpage = find_lock_page(mapping, idx);
 		page = calculate_subpage(h, hpage, current_addr);
+		pr_err("!!! freeing ranges: %lx\n", current_addr);
 		if (sz == PMD_SIZE) {
 			free_pte_range(&tlb, (pmd_t*)hpte.ptep, current_addr);
 		} else {
@@ -1078,10 +1086,11 @@ restart:
 		}
 		entry = make_huge_pte_with_shift(vma, page, vma->vm_flags & VM_WRITE, shift);
 		set_huge_pte_at(mm, current_addr, hpte.ptep, entry);
-		spin_unlock(ptl);
+		pr_err("!!! unlocking stuff: %lx\n", current_addr);
 		unlock_page(hpage);
+		spin_unlock(ptl);
 
-		current_addr += shift;
+		current_addr += sz;
 		goto restart;
 	}
 	ret = -EINVAL;
@@ -7117,11 +7126,12 @@ retry:
 				goto retry;
 			}
 			split_hugetlb_pte(vma, addr, (pte_t*)pud, PUD_SHIFT);
-		} else {
-			pte = (pte_t*)pud;
-			actual_shift = PUD_SHIFT;
-			goto out;
 		}
+	}
+	if (desired_sz == PUD_SIZE) {
+		pte = (pte_t*)pud;
+		actual_shift = PUD_SHIFT;
+		goto out;
 	}
 	pmd = pmd_alloc(mm, pud, addr);
 	if (!pmd)
@@ -7137,11 +7147,12 @@ retry:
 				goto retry;
 			}
 			split_hugetlb_pte(vma, addr, (pte_t*)pmd, PMD_SHIFT);
-		} else {
-			pte = (pte_t*)pmd;
-			actual_shift = PMD_SHIFT;
-			goto out;
 		}
+	}
+	if (desired_sz == PMD_SIZE) {
+		pte = (pte_t*)pmd;
+		actual_shift = PMD_SHIFT;
+		goto out;
 	}
 	actual_shift = PAGE_SHIFT;
 	pte = pte_offset_map(pmd, addr);

@@ -944,6 +944,7 @@ static long madvise_collapse(struct vm_area_struct *vma,
 			     struct vm_area_struct **prev,
 			     unsigned long start, unsigned long end)
 {
+	pr_err("madvise collapse\n");
 	*prev = vma;
 
 	if (!is_vm_hugetlb_page(vma))
@@ -1372,11 +1373,18 @@ int do_madvise(struct mm_struct *mm, unsigned long start, size_t len_in, int beh
 
 	write = madvise_need_mmap_write(behavior);
 	if (write) {
+		if (behavior == MADV_COLLAPSE)
+			pr_err("!!! about to take write lock\n");
 		if (mmap_write_lock_killable(mm))
 			return -EINTR;
 	} else {
+		if (behavior == MADV_COLLAPSE)
+			pr_err("!!! about to take read lock\n");
 		mmap_read_lock(mm);
 	}
+
+	if (behavior == MADV_COLLAPSE)
+		pr_err("!!! lock taken\n");
 
 	blk_start_plug(&plug);
 	error = madvise_walk_vmas(mm, start, end, behavior,
