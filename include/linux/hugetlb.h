@@ -49,17 +49,36 @@ enum {
 struct hugetlb_pte {
 	pte_t *ptep;
 	unsigned int shift;
+	bool valid;
 };
 
 static inline
-unsigned long hugetlb_pte_size(struct hugetlb_pte *pte) {
+void hugetlb_pte_init(struct hugetlb_pte *pte) {
+	pte->valid = false;
+	pte->shift = UINT_MAX;
+	pte->ptep = NULL;
+}
+
+static inline
+unsigned long hugetlb_pte_size(const struct hugetlb_pte *pte) {
+	BUG_ON(!pte->valid);
 	return 1UL << pte->shift;
 }
 
 static inline
-unsigned long hugetlb_pte_mask(struct hugetlb_pte *pte) {
+unsigned long hugetlb_pte_mask(const struct hugetlb_pte *pte) {
+	BUG_ON(!pte->valid);
 	return ~(hugetlb_pte_size(pte) - 1);
 }
+
+static inline
+void hugetlb_pte_copy(struct hugetlb_pte *dest, const struct hugetlb_pte *src) {
+	dest->prep = src->prep;
+	dest->shift = src->shift;
+	dest->valid = src->valid;
+}
+
+void hugetlb_free_range(struct hugetlb_pte *hpte);
 
 struct hugepage_subpool {
 	spinlock_t lock;
@@ -1165,6 +1184,12 @@ static inline spinlock_t *huge_pte_lock_shift(unsigned int shift,
 	ptl = huge_pte_lockptr(shift, mm, pte);
 	spin_lock(ptl);
 	return ptl;
+}
+
+static inline
+void hugetlb_pte_lock(struct mm_struct *mm, struct hugetlb_pte *hpte) {
+	BUG_ON(!hpte->valid || !hpte->ptep);
+	huge_pte_lock_shift(hpte->shift, mm, hpte->ptep);
 }
 
 int collapse_hugetlb_range(struct vm_area_struct *vma,
