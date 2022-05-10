@@ -7130,6 +7130,60 @@ err:
 	tlb_finish_mmu(&tlb);
 	return ret;
 }
+
+int huge_pte_alloc_high_granularity(struct hugetlb_pte *hpte,
+				    struct mm_struct *mm,
+				    struct vm_area_struct *vma,
+				    unsigned long addr,
+				    unsigned int desired_shift,
+				    enum split_mode mode,
+				    bool write_locked)
+{
+	struct address_space *mapping = vma->vm_file->f_mapping;
+	bool has_write_lock = write_locked;
+	unsigned long desired_sz = 1UL << desired_shift;
+	int ret;
+	BUG_ON(!hpte);
+
+	if (has_write_lock)
+		i_mmap_assert_write_locked(mapping);
+	else
+		i_mmap_assert_locked(mapping);
+
+retry:
+	ret = 0;
+	hugetlb_pte_init(hpte);
+
+	ret = hugetlb_walk_to(mm, hpte, addr, desired_sz,
+			      !(mode & SPLIT_NONE));
+	if (ret || hugetlb_pte_size(hpte) == desired_sz)
+		goto out;
+
+	if (
+		((mode & SPLIT_NONE) && hugetlb_pte_none(hpte)) ||
+		((mode & SPLIT_PRESENT) && hugetlb_pte_present_leaf(hpte))
+	   ) {
+		if (!has_write_lock) {
+			i_mmap_unlock_read(mapping);
+			i_mmap_lock_write(mapping);
+			has_write_lock = true;
+			goto retry;
+		}
+		ret = hugetlb_split_to_shift(mm, vma, hpte, addr,
+					     desired_shift);
+	}
+
+out:
+	if (has_write_lock && !write_locked) {
+		// Drop the write lock.
+		i_mmap_unlock_write(mapping);
+		i_mmap_lock_read(mapping);
+		has_write_lock = false;
+		goto retry;
+	}
+
+	return ret;
+}
 #endif /* CONFIG_HUGETLB_HIGH_GRANULARITY_MAPPING */
 
 /*
