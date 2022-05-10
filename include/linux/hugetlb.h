@@ -214,7 +214,8 @@ unsigned long hugetlb_total_pages(void);
 vm_fault_t hugetlb_fault(struct mm_struct *mm, struct vm_area_struct *vma,
 			unsigned long address, unsigned int flags);
 #ifdef CONFIG_USERFAULTFD
-int hugetlb_mcopy_atomic_pte(struct mm_struct *dst_mm, pte_t *dst_pte,
+int hugetlb_mcopy_atomic_pte(struct mm_struct *dst_mm,
+				struct hugetlb_pte *dst_hpte,
 				struct vm_area_struct *dst_vma,
 				unsigned long dst_addr,
 				unsigned long src_addr,
@@ -1282,15 +1283,30 @@ static inline enum hugetlb_level hpage_size_to_level(unsigned long sz)
 
 #ifdef CONFIG_HUGETLB_HIGH_GRANULARITY_MAPPING
 bool hugetlb_hgm_enabled(struct vm_area_struct *vma);
+bool hugetlb_hgm_advised(struct vm_area_struct *vma);
 bool hugetlb_hgm_eligible(struct vm_area_struct *vma);
+int hugetlb_alloc_largest_pte(struct hugetlb_pte *hpte, struct mm_struct *mm,
+			      struct vm_area_struct *vma, unsigned long start,
+			      unsigned long end);
 #else
 static inline bool hugetlb_hgm_enabled(struct vm_area_struct *vma)
+{
+	return false;
+}
+static inline bool hugetlb_hgm_advised(struct vm_area_struct *vma)
 {
 	return false;
 }
 static inline bool hugetlb_hgm_eligible(struct vm_area_struct *vma)
 {
 	return false;
+}
+static inline
+int hugetlb_alloc_largest_pte(struct hugetlb_pte *hpte, struct mm_struct *mm,
+			      struct vm_area_struct *vma, unsigned long start,
+			      unsigned long end)
+{
+	return -EINVAL;
 }
 #endif
 
