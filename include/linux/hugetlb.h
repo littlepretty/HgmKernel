@@ -97,6 +97,10 @@ void hugetlb_pte_copy(struct hugetlb_pte *dest, const struct hugetlb_pte *src)
 	dest->valid = src->valid;
 }
 
+bool hugetlb_pte_present_leaf(const struct hugetlb_pte *hpte);
+bool hugetlb_pte_none(const struct hugetlb_pte *hpte);
+bool hugetlb_pte_none_mostly(const struct hugetlb_pte *hpte);
+
 void hugetlb_free_range(struct mmu_gather *tlb, const struct hugetlb_pte *hpte,
 			unsigned long start, unsigned long end);
 
