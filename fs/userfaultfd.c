@@ -245,6 +245,9 @@ static inline bool userfaultfd_huge_must_wait(struct userfaultfd_ctx *ctx,
 	if (!ptep)
 		goto out;
 
+	if (hugetlb_hgm_enabled(vma))
+		goto out;
+
 	ret = false;
 	pte = huge_ptep_get(ptep);
 
