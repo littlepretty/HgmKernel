@@ -7029,6 +7029,11 @@ int hugetlb_walk_to(struct mm_struct *mm, struct hugetlb_pte *hpte,
 #endif /* CONFIG_ARCH_WANT_GENERAL_HUGETLB */
 
 #ifdef CONFIG_HUGETLB_HIGH_GRANULARITY_MAPPING
+bool hugetlb_hgm_enabled(struct vm_area_struct *vma)
+{
+	// All shared VMAs have HGM enabled.
+	return vma->vm_flags & VM_SHARED;
+}
 static unsigned int get_shift_for_hstate(struct hstate *h) {
 	if (h >= &hstates[hugetlb_max_hstate])
 		return PAGE_SHIFT;
