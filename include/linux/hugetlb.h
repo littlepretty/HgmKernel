@@ -1185,6 +1185,9 @@ enum split_mode {
 #ifdef CONFIG_HUGETLB_HIGH_GRANULARITY_MAPPING
 /* If HugeTLB high-granularity mappings are enabled for this VMA. */
 bool hugetlb_hgm_enabled(struct vm_area_struct *vma);
+int hugetlb_alloc_largest_pte(struct hugetlb_pte *hpte, struct mm_struct *mm,
+			      struct vm_area_struct *vma, unsigned long start,
+			      unsigned long end);
 int huge_pte_alloc_high_granularity(struct hugetlb_pte *hpte,
 				    struct mm_struct *mm,
 				    struct vm_area_struct *vma,
@@ -1197,6 +1200,15 @@ static inline bool hugetlb_hgm_enabled(struct vm_area_struct *vma)
 {
 	return false;
 }
+
+static inline
+int hugetlb_alloc_largest_pte(struct hugetlb_pte *hpte, struct mm_struct *mm,
+			      struct vm_area_struct *vma, unsigned long start,
+			      unsigned long end)
+{
+		BUG();
+}
+
 static inline int huge_pte_alloc_high_granularity(struct hugetlb_pte *hpte,
 					   struct mm_struct *mm,
 					   struct vm_area_struct *vma,
