@@ -6824,6 +6824,38 @@ bool hugetlb_hgm_enabled(struct vm_area_struct *vma)
 	return get_vma_private_data(vma)->double_mapped_shifts_num > 0;
 }
 
+int hugetlb_alloc_largest_pte(struct hugetlb_pte *hpte, struct mm_struct *mm,
+			      struct vm_area_struct *vma, unsigned long start,
+			      unsigned long end)
+{
+	struct hugetlb_vma_priv *hvp = get_vma_private_data(vma);
+	size_t shift_idx;
+	unsigned long smallest_sz = PAGE_SIZE;
+	int ret;
+	BUG_ON(!IS_ALIGNED(start, smallest_sz));
+	BUG_ON(!IS_ALIGNED(end, smallest_sz));
+	BUG_ON(hvp->double_mapped_shifts_num == 0);
+	for (shift_idx = 0; shift_idx < hvp->double_mapped_shifts_num;
+			++shift_idx) {
+		unsigned int shift = hvp->double_mapped_shifts[shift_idx];
+		unsigned long sz = 1UL << shift;
+		if (!IS_ALIGNED(start, sz) || start + sz > end)
+			continue;
+		ret = huge_pte_alloc_high_granularity(hpte, mm, vma, start,
+						      shift, SPLIT_NONE,
+						      /*write_locked=*/false);
+		if (ret)
+			return ret;
+
+		if (hpte->shift > shift)
+			return -EEXIST;
+
+		BUG_ON(hpte->shift != shift);
+		return 0;
+	}
+	return -EINVAL;
+}
+
 static int hugetlb_split_to_shift(struct mm_struct *mm, struct vm_area_struct *vma,
 			   const struct hugetlb_pte *hpte,
 			   unsigned long addr, unsigned long desired_shift)
