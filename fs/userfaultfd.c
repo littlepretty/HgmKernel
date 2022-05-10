@@ -245,13 +245,22 @@ static inline bool userfaultfd_huge_must_wait(struct userfaultfd_ctx *ctx,
 	struct mm_struct *mm = ctx->mm;
 	pte_t *ptep, pte;
 	bool ret = true;
+	struct hugetlb_pte hpte;
+	unsigned long sz = vma_mmu_pagesize(vma);
+	unsigned int shift = huge_page_shift(hstate_vma(vma));
+	struct address_space *mapping = vma->vm_file->f_mapping;
 
 	mmap_assert_locked(mm);
 
-	ptep = huge_pte_offset(mm, address, vma_mmu_pagesize(vma));
+	ptep = huge_pte_offset(mm, address, sz);
 
 	if (!ptep)
 		goto out;
+
+	hugetlb_pte_populate(&hpte, ptep, shift, hpage_size_to_level(sz));
+	hugetlb_hgm_walk(mm, vma, &hpte, address, PAGE_SIZE,
+			/*stop_at_none=*/true);
+	ptep = hpte.ptep;
 
 	ret = false;
 	pte = huge_ptep_get(ptep);
@@ -387,6 +396,7 @@ vm_fault_t handle_userfault(struct vm_fault *vmf, unsigned long reason)
 	vm_fault_t ret = VM_FAULT_SIGBUS;
 	bool must_wait;
 	unsigned int blocking_state;
+	struct address_space *mapping;
 
 	/*
 	 * We don't do userfault handling for the final child pid update.
@@ -498,6 +508,18 @@ vm_fault_t handle_userfault(struct vm_fault *vmf, unsigned long reason)
 
 	blocking_state = userfaultfd_get_blocking_state(vmf->flags);
 
+	if (is_vm_hugetlb_page(vmf->vma) && hugetlb_hgm_eligible(vmf->vma)) {
+		/*
+		 * Lock the mapping so we can do a high-granularity walk in
+		 * userfaultfd_huge_must_wait. We have to grab this lock before
+		 * we set our state to blocking.
+		 */
+		mapping = vmf->vma->vm_file->f_mapping;
+		if (!hugetlb_vma_lock_alloc(vmf->vma))
+			return VM_FAULT_OOM;
+		hugetlb_vma_lock_read(vmf->vma);
+	}
+
 	spin_lock_irq(&ctx->fault_pending_wqh.lock);
 	/*
 	 * After the __add_wait_queue the uwq is visible to userland
@@ -513,12 +535,15 @@ vm_fault_t handle_userfault(struct vm_fault *vmf, unsigned long reason)
 	spin_unlock_irq(&ctx->fault_pending_wqh.lock);
 
 	if (!is_vm_hugetlb_page(vmf->vma))
-		must_wait = userfaultfd_must_wait(ctx, vmf->address, vmf->flags,
-						  reason);
+		must_wait = userfaultfd_must_wait(ctx, vmf->real_address,
+				vmf->flags, reason);
 	else
 		must_wait = userfaultfd_huge_must_wait(ctx, vmf->vma,
-						       vmf->address,
+						       vmf->real_address,
 						       vmf->flags, reason);
+
+	if (is_vm_hugetlb_page(vmf->vma) && hugetlb_hgm_eligible(vmf->vma))
+		hugetlb_vma_unlock_read(vmf->vma);
 	mmap_read_unlock(mm);
 
 	if (likely(must_wait && !READ_ONCE(ctx->released))) {
@@ -1463,6 +1488,19 @@ static int userfaultfd_register(struct userfaultfd_ctx *ctx,
 			mas_pause(&mas);
 		}
 	next:
+		if (is_vm_hugetlb_page(vma) && hugetlb_hgm_eligible(vma)) {
+			bool ctx_hgm = ctx->features &
+				UFFD_FEATURE_MINOR_HUGETLBFS_HGM;
+			if (ctx_hgm) {
+				if (!hugetlb_vma_lock_alloc(vma)) {
+					ret = -ENOMEM;
+					break;
+				}
+				hugetlb_vma_lock_write(vma);
+				enable_hugetlb_hgm(vma);
+				hugetlb_vma_unlock_write(vma);
+			}
+		}
 		/*
 		 * In the vma_merge() successful mprotect-like case 8:
 		 * the next vma was merged into the current one and
