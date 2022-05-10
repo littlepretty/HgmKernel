@@ -6996,6 +6996,64 @@ pte_t *huge_pte_offset(struct mm_struct *mm,
 }
 
 /*
+ * hugetlb_walk_to() - Walk the page table to resolve the page (hugepage or
+ * subpage) entry at address @addr.
+ *
+ * @stop_at_none determines what we do when we encounter an empty PTE. If true,
+ * we return that PTE. If false and @sz is less than the current PTE's size,
+ * we make that PTE point to the next level down, going until @sz is the same
+ * as our current PTE.
+ *
+ * If @stop_at_none is true, this function will always succeed.
+ *
+ * Return: ENOMEM if there was a problem allocating the PTEs. 0 otherwise.
+ */
+int hugetlb_walk_to(struct mm_struct *mm, struct hugetlb_pte *hpte,
+		    unsigned long addr, unsigned long sz, bool stop_at_none)
+{
+	pte_t *ptep;
+
+	if (!hpte->ptep) {
+		pgd_t *pgd = pgd_offset(mm, addr);
+
+		if (!pgd)
+			return -ENOMEM;
+		ptep = (pte_t *)p4d_alloc(mm, pgd, addr);
+		if (!ptep)
+			return -ENOMEM;
+		hugetlb_pte_populate(hpte, ptep, P4D_SHIFT);
+	}
+
+	while (hugetlb_pte_size(hpte) > sz &&
+			!hugetlb_pte_present_leaf(hpte) &&
+			!(stop_at_none && hugetlb_pte_none(hpte))) {
+		if (hpte->shift == PMD_SHIFT) {
+			ptep = pte_alloc_map(mm, (pmd_t *)hpte->ptep, addr);
+			if (!ptep)
+				return -ENOMEM;
+			hpte->shift = PAGE_SHIFT;
+			hpte->ptep = ptep;
+		} else if (hpte->shift == PUD_SHIFT) {
+			ptep = (pte_t *)pmd_alloc(mm, (pud_t *)hpte->ptep,
+						  addr);
+			if (!ptep)
+				return -ENOMEM;
+			hpte->shift = PMD_SHIFT;
+			hpte->ptep = ptep;
+		} else if (hpte->shift == P4D_SHIFT) {
+			ptep = (pte_t *)pud_alloc(mm, (p4d_t *)hpte->ptep,
+						  addr);
+			if (!ptep)
+				return -ENOMEM;
+			hpte->shift = PUD_SHIFT;
+			hpte->ptep = ptep;
+		} else
+			BUG();
+	}
+	return 0;
+}
+
+/*
  * Return a mask that can be used to update an address to the last huge
  * page in a page table page mapping size.  Used to skip non-present
  * page table entries when linearly scanning address ranges.  Architectures
