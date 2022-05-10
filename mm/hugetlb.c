@@ -96,6 +96,24 @@ struct mutex *hugetlb_fault_mutex_table ____cacheline_aligned_in_smp;
 /* Forward declaration */
 static int hugetlb_acct_memory(struct hstate *h, long delta);
 
+hugetlb_level_t hpage_size_to_level(unsigned long sz) {
+	/*
+	 * We order the conditionals from smallest to largest to pick the
+	 * smallest level when multiple levels have the same "size".
+	 * For example, with 4-level-paging on x86, PGDIR_SIZE and P4D_SIZE
+	 * are the same. In this case, we pick HUGETLB_LEVEL_P4D.
+	 */
+	if (sz < PMD_SIZE)
+		return HUGETLB_LEVEL_PTE;
+	if (sz < PUD_SIZE)
+		return HUGETLB_LEVEL_PMD;
+	if (sz < P4D_SIZE)
+		return HUGETLB_LEVEL_PUD;
+	if (sz < PGDIR_SIZE)
+		return HUGETLB_LEVEL_P4D;
+	return HUGETLB_LEVEL_PGD;
+}
+
 static inline bool subpool_is_free(struct hugepage_subpool *spool)
 {
 	if (spool->count)
@@ -6952,6 +6970,80 @@ pte_t *huge_pte_offset(struct mm_struct *mm,
 	pmd = pmd_offset(pud, addr);
 	/* must be pmd huge, non-present or none */
 	return (pte_t *)pmd;
+}
+
+/*
+ * hugetlb_walk_to() - Walk the page table to resolve the page (hugepage or
+ * subpage) entry at address @addr.
+ *
+ * @stop_at_none determines what we do when we encounter an empty PTE. If true,
+ * we return that PTE. If false and @sz is less than the current PTE's size,
+ * we make that PTE point to the next level down, going until @sz is the same
+ * as our current PTE.
+ *
+ * If @stop_at_none is true, this function will always succeed.
+ *
+ * Return: ENOMEM if there was a problem allocating the PTEs. 0 otherwise.
+ */
+int hugetlb_walk_to(struct mm_struct *mm, struct hugetlb_pte *hpte,
+		    unsigned long addr, unsigned long sz, bool stop_at_none)
+{
+	hugetlb_level_t target_level = hpage_size_to_level(sz);
+	pte_t *ptep;
+
+	if (!hpte->ptep) {
+		pgd_t *pgd = pgd_offset(mm, addr);
+
+		if (!pgd)
+			return -ENOMEM;
+		ptep = (pte_t *)p4d_alloc(mm, pgd, addr);
+		if (!ptep)
+			return -ENOMEM;
+		hugetlb_pte_populate(hpte, ptep, P4D_SHIFT, HUGETLB_LEVEL_P4D);
+	}
+
+	while (hugetlb_pte_size(hpte) > sz && !hugetlb_pte_present_leaf(hpte)) {
+		bool pte_none = huge_pte_none(huge_ptep_get(hpte->ptep));
+		if (pte_none && stop_at_none)
+			break;
+		/*
+		 * It's possible that different "levels" have the same size.
+		 * For example, when using 4-level-paging on x86,
+		 * P4D_SIZE == PGDIR_SIZE. To handle this case, switch on the
+		 * page table level here, not the HugeTLB PTE size.
+		 */
+		switch(hpte->level) {
+			case HUGETLB_LEVEL_P4D:
+				ptep = (pte_t *)pud_alloc(mm,
+						(p4d_t *)hpte->ptep, addr);
+				if (!ptep)
+					return -ENOMEM;
+				hugetlb_pte_populate(hpte, ptep, PUD_SHIFT,
+						HUGETLB_LEVEL_PUD);
+				break;
+			case HUGETLB_LEVEL_PUD:
+				ptep = (pte_t *)pmd_alloc(mm,
+						(pud_t *)hpte->ptep,
+						addr);
+				if (!ptep)
+					return -ENOMEM;
+				hugetlb_pte_populate(hpte, ptep, PMD_SHIFT,
+						HUGETLB_LEVEL_PMD);
+				break;
+			case HUGETLB_LEVEL_PMD:
+				ptep = pte_alloc_map(mm, (pmd_t *)hpte->ptep,
+						addr);
+				if (!ptep)
+					return -ENOMEM;
+				hugetlb_pte_populate(hpte, ptep, PAGE_SHIFT,
+						HUGETLB_LEVEL_PTE);
+				break;
+			default:
+				BUG();
+		}
+	}
+	BUG_ON(hpte->level != target_level);
+	return 0;
 }
 
 /*
