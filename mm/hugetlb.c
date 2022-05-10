@@ -5575,7 +5575,7 @@ retry:
 			unlock_page(page);
 			put_page(page);
 			ret = hugetlb_handle_userfault(vma, mapping, idx,
-						       flags, haddr,
+						       flags, address,
 						       VM_UFFD_MINOR);
 			goto out;
 		}
