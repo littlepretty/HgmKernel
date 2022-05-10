@@ -1173,6 +1173,33 @@ static inline void set_huge_pte_at(struct mm_struct *mm, unsigned long addr,
 }
 #endif	/* CONFIG_HUGETLB_PAGE */
 
+enum split_mode {
+	SPLIT_NEVER,
+	SPLIT_NONE,
+	SPLIT_PRESENT,
+	SPLIT_ALWAYS = SPLIT_NONE | SPLIT_PRESENT,
+};
+#ifdef CONFIG_HUGETLB_HIGH_GRANULARITY_MAPPING
+int huge_pte_alloc_high_granularity(struct hugetlb_pte *hpte,
+				    struct mm_struct *mm,
+				    struct vm_area_struct *vma,
+				    unsigned long addr,
+				    unsigned int desired_sz,
+				    enum split_mode mode,
+				    bool write_locked);
+#else
+static inline int huge_pte_alloc_high_granularity(struct hugetlb_pte *hpte,
+					   struct mm_struct *mm,
+					   struct vm_area_struct *vma,
+					   unsigned long addr,
+					   unsigned int desired_sz,
+					   enum split_mode mode,
+					   bool write_locked)
+{
+	return -EINVAL;
+}
+#endif
+
 static inline spinlock_t *huge_pte_lock(struct hstate *h,
 					struct mm_struct *mm, pte_t *pte)
 {
