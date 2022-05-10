@@ -237,6 +237,14 @@ u32 hugetlb_fault_mutex_hash(struct address_space *mapping, pgoff_t idx);
 pte_t *huge_pmd_share(struct mm_struct *mm, struct vm_area_struct *vma,
 		      unsigned long addr, pud_t *pud);
 
+int hugetlb_full_walk(struct hugetlb_pte *hpte, struct vm_area_struct *vma,
+		      unsigned long addr);
+void hugetlb_full_walk_continue(struct hugetlb_pte *hpte,
+				struct vm_area_struct *vma, unsigned long addr);
+int hugetlb_full_walk_alloc(struct hugetlb_pte *hpte,
+			    struct vm_area_struct *vma, unsigned long addr,
+			    unsigned long target_sz);
+
 struct address_space *hugetlb_page_mapping_lock_write(struct page *hpage);
 
 extern int sysctl_hugetlb_shm_group;
@@ -286,6 +294,8 @@ pte_t *huge_pte_alloc(struct mm_struct *mm, struct vm_area_struct *vma,
 pte_t *huge_pte_offset(struct mm_struct *mm,
 		       unsigned long addr, unsigned long sz);
 unsigned long hugetlb_mask_last_page(struct hstate *h);
+int hugetlb_walk_step(struct mm_struct *mm, struct hugetlb_pte *hpte,
+		      unsigned long addr, unsigned long sz);
 int huge_pmd_unshare(struct mm_struct *mm, struct vm_area_struct *vma,
 				unsigned long addr, pte_t *ptep);
 void adjust_range_if_pmd_sharing_possible(struct vm_area_struct *vma,
@@ -1065,6 +1075,8 @@ void hugetlb_register_node(struct node *node);
 void hugetlb_unregister_node(struct node *node);
 #endif
 
+enum hugetlb_level hpage_size_to_level(unsigned long sz);
+
 #else	/* CONFIG_HUGETLB_PAGE */
 struct hstate {};
 
@@ -1257,6 +1269,11 @@ static inline void hugetlb_register_node(struct node *node)
 static inline void hugetlb_unregister_node(struct node *node)
 {
 }
+
+static inline enum hugetlb_level hpage_size_to_level(unsigned long sz)
+{
+	return HUGETLB_LEVEL_PTE;
+}
 #endif	/* CONFIG_HUGETLB_PAGE */
 
 #ifdef CONFIG_HUGETLB_HIGH_GRANULARITY_MAPPING
@@ -1337,12 +1354,8 @@ __vma_has_hugetlb_vma_lock(struct vm_area_struct *vma)
 		vma->vm_private_data;
 }
 
-/*
- * Safe version of huge_pte_offset() to check the locks.  See comments
- * above huge_pte_offset().
- */
-static inline pte_t *
-hugetlb_walk(struct vm_area_struct *vma, unsigned long addr, unsigned long sz)
+static inline void
+hugetlb_walk_lock_check(struct vm_area_struct *vma)
 {
 #if defined(CONFIG_HUGETLB_PAGE) && \
 	defined(CONFIG_ARCH_WANT_HUGE_PMD_SHARE) && defined(CONFIG_LOCKDEP)
@@ -1364,6 +1377,16 @@ hugetlb_walk(struct vm_area_struct *vma, unsigned long addr, unsigned long sz)
 			     !lockdep_is_held(
 				 &vma->vm_file->f_mapping->i_mmap_rwsem));
 #endif
+}
+
+/*
+ * Safe version of huge_pte_offset() to check the locks.  See comments
+ * above huge_pte_offset().
+ */
+static inline pte_t *
+hugetlb_walk(struct vm_area_struct *vma, unsigned long addr, unsigned long sz)
+{
+	hugetlb_walk_lock_check(vma);
 	return huge_pte_offset(vma->vm_mm, addr, sz);
 }
 

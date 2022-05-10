@@ -95,6 +95,29 @@ static void hugetlb_vma_lock_free(struct vm_area_struct *vma);
 static int hugetlb_vma_lock_alloc(struct vm_area_struct *vma);
 static void __hugetlb_vma_unlock_write_free(struct vm_area_struct *vma);
 
+/*
+ * hpage_size_to_level() - convert @sz to the corresponding page table level
+ *
+ * @sz must be less than or equal to a valid hugepage size.
+ */
+enum hugetlb_level hpage_size_to_level(unsigned long sz)
+{
+	/*
+	 * We order the conditionals from smallest to largest to pick the
+	 * smallest level when multiple levels have the same size (i.e.,
+	 * when levels are folded).
+	 */
+	if (sz < PMD_SIZE)
+		return HUGETLB_LEVEL_PTE;
+	if (sz < PUD_SIZE)
+		return HUGETLB_LEVEL_PMD;
+	if (sz < P4D_SIZE)
+		return HUGETLB_LEVEL_PUD;
+	if (sz < PGDIR_SIZE)
+		return HUGETLB_LEVEL_P4D;
+	return HUGETLB_LEVEL_PGD;
+}
+
 static inline bool subpool_is_free(struct hugepage_subpool *spool)
 {
 	if (spool->count)
@@ -7314,6 +7337,150 @@ bool want_pmd_share(struct vm_area_struct *vma, unsigned long addr)
 }
 #endif /* CONFIG_ARCH_WANT_HUGE_PMD_SHARE */
 
+/* hugetlb_hgm_walk - walks a high-granularity HugeTLB page table to resolve
+ * the page table entry for @addr. We might allocate new PTEs.
+ *
+ * @hpte must always be pointing at an hstate-level PTE or deeper.
+ *
+ * This function will never walk further if it encounters a PTE of a size
+ * less than or equal to @sz.
+ *
+ * @alloc determines what we do when we encounter an empty PTE. If false,
+ * we stop walking. If true and @sz is less than the current PTE's size,
+ * we make that PTE point to the next level down, going until @sz is the same
+ * as our current PTE.
+ *
+ * If @alloc is false and @sz is PAGE_SIZE, this function will always
+ * succeed, but that does not guarantee that hugetlb_pte_size(hpte) is @sz.
+ *
+ * Return:
+ *	-ENOMEM if we couldn't allocate new PTEs.
+ *	-EEXIST if the caller wanted to walk further than a migration PTE,
+ *		poison PTE, or a PTE marker. The caller needs to manually deal
+ *		with this scenario.
+ *	-EINVAL if called with invalid arguments (@sz invalid, @hpte not
+ *		initialized).
+ *	0 otherwise.
+ *
+ *	Even if this function fails, @hpte is guaranteed to always remain
+ *	valid.
+ */
+static int hugetlb_hgm_walk(struct mm_struct *mm, struct vm_area_struct *vma,
+			    struct hugetlb_pte *hpte, unsigned long addr,
+			    unsigned long sz, bool alloc)
+{
+	int ret = 0;
+	pte_t pte;
+
+	if (WARN_ON_ONCE(sz < PAGE_SIZE))
+		return -EINVAL;
+
+	if (WARN_ON_ONCE(!hpte->ptep))
+		return -EINVAL;
+
+	/* We have the same synchronization requirements as hugetlb_walk. */
+	hugetlb_walk_lock_check(vma);
+
+	while (hugetlb_pte_size(hpte) > sz && !ret) {
+		pte = huge_ptep_get(hpte->ptep);
+		if (!pte_present(pte)) {
+			if (!alloc)
+				return 0;
+			if (unlikely(!huge_pte_none(pte)))
+				return -EEXIST;
+		} else if (hugetlb_pte_present_leaf(hpte, pte))
+			return 0;
+		ret = hugetlb_walk_step(mm, hpte, addr, sz);
+	}
+
+	return ret;
+}
+
+static int hugetlb_hgm_walk_uninit(struct hugetlb_pte *hpte,
+				   pte_t *ptep,
+				   struct vm_area_struct *vma,
+				   unsigned long addr,
+				   unsigned long target_sz,
+				   bool alloc)
+{
+	struct hstate *h = hstate_vma(vma);
+
+	hugetlb_pte_populate(vma->vm_mm, hpte, ptep, huge_page_shift(h),
+			     hpage_size_to_level(huge_page_size(h)));
+	return hugetlb_hgm_walk(vma->vm_mm, vma, hpte, addr, target_sz,
+				alloc);
+}
+
+/*
+ * hugetlb_full_walk_continue - continue a high-granularity page-table walk.
+ *
+ * If a user has a valid @hpte but knows that @hpte is not a leaf, they can
+ * attempt to continue walking by calling this function.
+ *
+ * This function may never fail, but @hpte might not change.
+ *
+ * If @hpte is not valid, then this function is a no-op.
+ */
+void hugetlb_full_walk_continue(struct hugetlb_pte *hpte,
+				struct vm_area_struct *vma,
+				unsigned long addr)
+{
+	/* hugetlb_hgm_walk will never fail with these arguments. */
+	hugetlb_hgm_walk(vma->vm_mm, vma, hpte, addr, PAGE_SIZE, false);
+}
+
+/*
+ * hugetlb_full_walk - do a high-granularity page-table walk; never allocate.
+ *
+ * This function can only fail if we find that the hstate-level PTE is not
+ * allocated. Callers can take advantage of this fact to skip address regions
+ * must also not be mapped in that case.
+ *
+ * If this function succeeds, @hpte is guaranteed to be valid.
+ */
+int hugetlb_full_walk(struct hugetlb_pte *hpte,
+		      struct vm_area_struct *vma,
+		      unsigned long addr)
+{
+	struct hstate *h = hstate_vma(vma);
+	unsigned long sz = huge_page_size(h);
+	/*
+	 * We must mask the address appropriately so that we pick up the first
+	 * PTE in a contiguous group.
+	 */
+	pte_t *ptep = hugetlb_walk(vma, addr & huge_page_mask(h), sz);
+	if (!ptep)
+		return -ENOMEM;
+
+	/* hugetlb_hgm_walk_uninit will never fail with these arguments. */
+	hugetlb_hgm_walk_uninit(hpte, ptep, vma, addr, PAGE_SIZE, false);
+	return 0;
+}
+
+/*
+ * hugetlb_full_walk_alloc - do a high-granularity walk, potentially allocate
+ *	new PTEs.
+ */
+int hugetlb_full_walk_alloc(struct hugetlb_pte *hpte,
+				   struct vm_area_struct *vma,
+				   unsigned long addr,
+				   unsigned long target_sz)
+{
+	struct hstate *h = hstate_vma(vma);
+	unsigned long sz = huge_page_size(h);
+	/*
+	 * We must mask the address appropriately so that we pick up the first
+	 * PTE in a contiguous group.
+	 */
+	pte_t *ptep = huge_pte_alloc(vma->vm_mm, vma, addr & huge_page_mask(h),
+				     sz);
+
+	if (!ptep)
+		return -ENOMEM;
+
+	return hugetlb_hgm_walk_uninit(hpte, ptep, vma, addr, target_sz, true);
+}
+
 #ifdef CONFIG_ARCH_WANT_GENERAL_HUGETLB
 pte_t *huge_pte_alloc(struct mm_struct *mm, struct vm_area_struct *vma,
 			unsigned long addr, unsigned long sz)
@@ -7379,6 +7546,49 @@ pte_t *huge_pte_offset(struct mm_struct *mm,
 	pmd = pmd_offset(pud, addr);
 	/* must be pmd huge, non-present or none */
 	return (pte_t *)pmd;
+}
+
+/*
+ * hugetlb_walk_step() - Walk the page table one step to resolve the page
+ * (hugepage or subpage) entry at address @addr.
+ *
+ * @sz always points at the final target PTE size (e.g. PAGE_SIZE for the
+ * lowest level PTE).
+ *
+ * @hpte will always remain valid, even if this function fails.
+ *
+ * Architectures that implement this function must ensure that if @hpte does
+ * not change levels, then its PTL must also stay the same.
+ */
+int hugetlb_walk_step(struct mm_struct *mm, struct hugetlb_pte *hpte,
+		      unsigned long addr, unsigned long sz)
+{
+	pte_t *ptep;
+	spinlock_t *ptl;
+
+	switch (hpte->level) {
+	case HUGETLB_LEVEL_PUD:
+		ptep = (pte_t *)hugetlb_alloc_pmd(mm, hpte, addr);
+		if (IS_ERR(ptep))
+			return PTR_ERR(ptep);
+		hugetlb_pte_populate(mm, hpte, ptep, PMD_SHIFT,
+				     HUGETLB_LEVEL_PMD);
+		break;
+	case HUGETLB_LEVEL_PMD:
+		ptep = hugetlb_alloc_pte(mm, hpte, addr);
+		if (IS_ERR(ptep))
+			return PTR_ERR(ptep);
+		ptl = pte_lockptr(mm, (pmd_t *)hpte->ptep);
+		__hugetlb_pte_populate(hpte, ptep, PAGE_SHIFT,
+				       HUGETLB_LEVEL_PTE, ptl);
+		hpte->ptl = ptl;
+		break;
+	default:
+		WARN_ONCE(1, "%s: got invalid level: %d (shift: %d)\n",
+				__func__, hpte->level, hpte->shift);
+		return -EINVAL;
+	}
+	return 0;
 }
 
 /*
