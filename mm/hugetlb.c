@@ -1120,6 +1120,23 @@ static bool vma_has_reserves(struct vm_area_struct *vma, long chg)
 	return false;
 }
 
+void hugetlb_free_range(struct mmu_gather *tlb, const struct hugetlb_pte *hpte,
+			unsigned long start, unsigned long end)
+{
+	unsigned long floor = start & hugetlb_pte_mask(hpte);
+	unsigned long ceiling = floor + hugetlb_pte_size(hpte);
+
+	if (hugetlb_pte_size(hpte) >= PGDIR_SIZE) {
+		free_p4d_range(tlb, (pgd_t *)hpte->ptep, start, end, floor, ceiling);
+	} else if (hugetlb_pte_size(hpte) >= P4D_SIZE) {
+		free_pud_range(tlb, (p4d_t *)hpte->ptep, start, end, floor, ceiling);
+	} else if (hugetlb_pte_size(hpte) >= PUD_SIZE) {
+		free_pmd_range(tlb, (pud_t *)hpte->ptep, start, end, floor, ceiling);
+	} else if (hugetlb_pte_size(hpte) >= PMD_SIZE) {
+		free_pte_range(tlb, (pmd_t *)hpte->ptep, start);
+	}
+}
+
 bool hugetlb_pte_present_leaf(const struct hugetlb_pte *hpte)
 {
 	pgd_t pgd;
