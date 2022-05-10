@@ -1176,13 +1176,36 @@ static inline void set_huge_pte_at(struct mm_struct *mm, unsigned long addr,
 }
 #endif	/* CONFIG_HUGETLB_PAGE */
 
+enum split_mode {
+	HUGETLB_SPLIT_NEVER   = 0,
+	HUGETLB_SPLIT_NONE    = 1 << 0,
+	HUGETLB_SPLIT_PRESENT = 1 << 1,
+	HUGETLB_SPLIT_ALWAYS  = HUGETLB_SPLIT_NONE | HUGETLB_SPLIT_PRESENT,
+};
 #ifdef CONFIG_HUGETLB_HIGH_GRANULARITY_MAPPING
 /* If HugeTLB high-granularity mappings are enabled for this VMA. */
 bool hugetlb_hgm_enabled(struct vm_area_struct *vma);
+int huge_pte_alloc_high_granularity(struct hugetlb_pte *hpte,
+				    struct mm_struct *mm,
+				    struct vm_area_struct *vma,
+				    unsigned long addr,
+				    unsigned int desired_sz,
+				    enum split_mode mode,
+				    bool write_locked);
 #else
 static inline bool hugetlb_hgm_enabled(struct vm_area_struct *vma)
 {
 	return false;
+}
+static inline int huge_pte_alloc_high_granularity(struct hugetlb_pte *hpte,
+					   struct mm_struct *mm,
+					   struct vm_area_struct *vma,
+					   unsigned long addr,
+					   unsigned int desired_sz,
+					   enum split_mode mode,
+					   bool write_locked)
+{
+	return -EINVAL;
 }
 #endif
 
