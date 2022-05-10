@@ -7077,6 +7077,32 @@ static unsigned int get_shift_for_hstate(struct hstate *h) {
 			       (tmp_h) <= &hstates[hugetlb_max_hstate]; \
 			       (tmp_h)++)
 
+int hugetlb_alloc_largest_pte(struct hugetlb_pte *hpte, struct mm_struct *mm,
+			      struct vm_area_struct *vma, unsigned long start,
+			      unsigned long end)
+{
+	struct hstate *h = hstate_vma(vma), *tmp_h;
+	unsigned int shift;
+	int ret;
+	for_each_hgm_shift(h, tmp_h, shift) {
+		unsigned long sz = 1UL << shift;
+		if (!IS_ALIGNED(start, sz) || start + sz > end)
+			continue;
+		ret = huge_pte_alloc_high_granularity(hpte, mm, vma, start,
+						      shift, SPLIT_NONE,
+						      /*write_locked=*/false);
+		if (ret)
+			return ret;
+
+		if (hpte->shift > shift)
+			return -EEXIST;
+
+		BUG_ON(hpte->shift != shift);
+		return 0;
+	}
+	return -EINVAL;
+}
+
 static int hugetlb_split_to_shift(struct mm_struct *mm, struct vm_area_struct *vma,
 			   const struct hugetlb_pte *hpte,
 			   unsigned long addr, unsigned long desired_shift)
