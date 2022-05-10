@@ -6787,6 +6787,11 @@ int hugetlb_walk_to(struct mm_struct *mm, struct hugetlb_pte *hpte,
 #endif /* CONFIG_ARCH_WANT_GENERAL_HUGETLB */
 
 #ifdef CONFIG_HUGETLB_DOUBLE_MAP
+bool hugetlb_hgm_enabled(struct vm_area_struct *vma)
+{
+	return get_vma_private_data(vma)->double_mapped_shifts_num > 0;
+}
+
 static int hugetlb_split_to_shift(struct mm_struct *mm, struct vm_area_struct *vma,
 			   const struct hugetlb_pte *hpte,
 			   unsigned long addr, unsigned long desired_shift)
