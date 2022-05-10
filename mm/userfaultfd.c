@@ -334,14 +334,16 @@ static __always_inline ssize_t __mcopy_atomic_hugetlb(struct mm_struct *dst_mm,
 {
 	int vm_shared = dst_vma->vm_flags & VM_SHARED;
 	ssize_t err;
-	pte_t *dst_pte;
 	unsigned long src_addr, dst_addr;
 	long copied;
 	struct page *page;
-	unsigned long vma_hpagesize;
+	unsigned long vma_hpagesize, target_pagesize;
 	pgoff_t idx;
 	u32 hash;
 	struct address_space *mapping;
+	bool use_hgm = uffd_ctx_has_hgm(&dst_vma->vm_userfaultfd_ctx) &&
+		mode == MCOPY_ATOMIC_CONTINUE;
+	struct hstate *h = hstate_vma(dst_vma);
 
 	/*
 	 * There is no default zero huge page for all huge page sizes as
@@ -359,12 +361,13 @@ static __always_inline ssize_t __mcopy_atomic_hugetlb(struct mm_struct *dst_mm,
 	copied = 0;
 	page = NULL;
 	vma_hpagesize = vma_kernel_pagesize(dst_vma);
+	target_pagesize = use_hgm ? PAGE_SIZE : vma_hpagesize;
 
 	/*
-	 * Validate alignment based on huge page size
+	 * Validate alignment based on the targeted page size.
 	 */
 	err = -EINVAL;
-	if (dst_start & (vma_hpagesize - 1) || len & (vma_hpagesize - 1))
+	if (dst_start & (target_pagesize - 1) || len & (target_pagesize - 1))
 		goto out_unlock;
 
 retry:
@@ -381,6 +384,8 @@ retry:
 		err = -EINVAL;
 		if (vma_hpagesize != vma_kernel_pagesize(dst_vma))
 			goto out_unlock;
+		if (use_hgm && !hugetlb_hgm_enabled(dst_vma))
+			goto out_unlock;
 
 		vm_shared = dst_vma->vm_flags & VM_SHARED;
 	}
@@ -395,13 +400,15 @@ retry:
 	}
 
 	while (src_addr < src_start + len) {
+		struct hugetlb_pte hpte;
+		pte_t *dst_pte;
 		BUG_ON(dst_addr >= dst_start + len);
 
 		/*
 		 * Serialize via vma_lock and hugetlb_fault_mutex.
-		 * vma_lock ensures the dst_pte remains valid even
-		 * in the case of shared pmds.  fault mutex prevents
-		 * races with other faulting threads.
+		 * vma_lock ensures the hpte.ptep remains valid even
+		 * in the case of shared pmds and page table collapsing.
+		 * fault mutex prevents races with other faulting threads.
 		 */
 		idx = linear_page_index(dst_vma, dst_addr);
 		mapping = dst_vma->vm_file->f_mapping;
@@ -409,23 +416,33 @@ retry:
 		mutex_lock(&hugetlb_fault_mutex_table[hash]);
 		hugetlb_vma_lock_read(dst_vma);
 
-		err = -ENOMEM;
+		err = 0;
 		dst_pte = huge_pte_alloc(dst_mm, dst_vma, dst_addr, vma_hpagesize);
-		if (!dst_pte) {
+		if (!dst_pte)
+			err = -ENOMEM;
+		else {
+			hugetlb_pte_populate(&hpte, dst_pte, huge_page_shift(h),
+					hpage_size_to_level(huge_page_size(h)));
+			if (use_hgm)
+				err = hugetlb_alloc_largest_pte(&hpte,
+						dst_mm, dst_vma, dst_addr,
+						dst_start + len);
+		}
+		if (err) {
 			hugetlb_vma_unlock_read(dst_vma);
 			mutex_unlock(&hugetlb_fault_mutex_table[hash]);
 			goto out_unlock;
 		}
 
 		if (mode != MCOPY_ATOMIC_CONTINUE &&
-		    !huge_pte_none_mostly(huge_ptep_get(dst_pte))) {
+		    !huge_pte_none_mostly(huge_ptep_get(hpte.ptep))) {
 			err = -EEXIST;
 			hugetlb_vma_unlock_read(dst_vma);
 			mutex_unlock(&hugetlb_fault_mutex_table[hash]);
 			goto out_unlock;
 		}
 
-		err = hugetlb_mcopy_atomic_pte(dst_mm, dst_pte, dst_vma,
+		err = hugetlb_mcopy_atomic_pte(dst_mm, &hpte, dst_vma,
 					       dst_addr, src_addr, mode, &page,
 					       wp_copy);
 
@@ -437,6 +454,7 @@ retry:
 		if (unlikely(err == -ENOENT)) {
 			mmap_read_unlock(dst_mm);
 			BUG_ON(!page);
+			BUG_ON(hpte.shift != huge_page_shift(h));
 
 			err = copy_huge_page_from_user(page,
 						(const void __user *)src_addr,
@@ -454,9 +472,9 @@ retry:
 			BUG_ON(page);
 
 		if (!err) {
-			dst_addr += vma_hpagesize;
-			src_addr += vma_hpagesize;
-			copied += vma_hpagesize;
+			dst_addr += hugetlb_pte_size(&hpte);
+			src_addr += hugetlb_pte_size(&hpte);
+			copied += hugetlb_pte_size(&hpte);
 
 			if (fatal_signal_pending(current))
 				err = -EINTR;
