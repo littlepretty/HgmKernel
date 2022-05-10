@@ -1193,6 +1193,10 @@ static inline hugetlb_level_t hpage_size_to_level(unsigned long sz)
 }
 #endif	/* CONFIG_HUGETLB_PAGE */
 
+enum hugetlb_split_mode {
+	HUGETLB_SPLIT_NEVER   = 0,
+	HUGETLB_SPLIT_NONE    = 1 << 0,
+};
 #ifdef CONFIG_HUGETLB_HIGH_GRANULARITY_MAPPING
 bool hugetlb_hgm_enabled(struct vm_area_struct *vma);
 bool hugetlb_hgm_eligible(struct vm_area_struct *vma);
