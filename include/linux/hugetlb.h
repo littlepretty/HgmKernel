@@ -1196,10 +1196,23 @@ static inline hugetlb_level_t hpage_size_to_level(unsigned long sz)
 }
 #endif	/* CONFIG_HUGETLB_PAGE */
 
+enum split_mode {
+	HUGETLB_SPLIT_NEVER   = 0,
+	HUGETLB_SPLIT_NONE    = 1 << 0,
+	HUGETLB_SPLIT_PRESENT = 1 << 1,
+	HUGETLB_SPLIT_ALWAYS  = HUGETLB_SPLIT_NONE | HUGETLB_SPLIT_PRESENT,
+};
 #ifdef CONFIG_HUGETLB_HIGH_GRANULARITY_MAPPING
 bool hugetlb_hgm_enabled(struct vm_area_struct *vma);
 bool hugetlb_hgm_eligible(struct vm_area_struct *vma);
 int enable_hugetlb_hgm(struct vm_area_struct *vma);
+int huge_pte_alloc_high_granularity(struct hugetlb_pte *hpte,
+				    struct mm_struct *mm,
+				    struct vm_area_struct *vma,
+				    unsigned long addr,
+				    unsigned int desired_sz,
+				    enum split_mode mode,
+				    bool write_locked);
 #else
 static inline bool hugetlb_hgm_enabled(struct vm_area_struct *vma)
 {
@@ -1210,6 +1223,16 @@ static inline bool hugetlb_hgm_eligible(struct vm_area_struct *vma)
 	return false;
 }
 static inline int enable_hugetlb_hgm(struct vm_area_struct *vma)
+{
+	return -EINVAL;
+}
+static inline int huge_pte_alloc_high_granularity(struct hugetlb_pte *hpte,
+					   struct mm_struct *mm,
+					   struct vm_area_struct *vma,
+					   unsigned long addr,
+					   unsigned int desired_sz,
+					   enum split_mode mode,
+					   bool write_locked)
 {
 	return -EINVAL;
 }
