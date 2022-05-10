@@ -5596,18 +5596,22 @@ static inline vm_fault_t hugetlb_handle_userfault(struct vm_area_struct *vma,
 static vm_fault_t hugetlb_no_page(struct mm_struct *mm,
 			struct vm_area_struct *vma,
 			struct address_space *mapping, pgoff_t idx,
-			unsigned long address, pte_t *ptep,
+			unsigned long address, struct hugetlb_pte *hpte,
 			pte_t old_pte, unsigned int flags)
 {
 	struct hstate *h = hstate_vma(vma);
 	vm_fault_t ret = VM_FAULT_SIGBUS;
 	int anon_rmap = 0;
 	unsigned long size;
-	struct page *page;
+	struct page *page, *subpage;
 	pte_t new_pte;
 	spinlock_t *ptl;
 	unsigned long haddr = address & huge_page_mask(h);
+	unsigned long haddr_hgm = address & hugetlb_pte_mask(hpte);
 	bool new_page, new_pagecache_page = false;
+	// This page is getting mapped for the first time, in which case we
+	// want to increment its mapcount.
+	bool new_mapping = hpte->shift == huge_page_shift(h);
 
 	/*
 	 * Currently, we are forced to kill the process in the event the
@@ -5656,9 +5660,9 @@ retry:
 			 * here.  Before returning error, get ptl and make
 			 * sure there really is no pte entry.
 			 */
-			ptl = huge_pte_lock(h, mm, ptep);
+			ptl = hugetlb_pte_lock(mm, hpte);
 			ret = 0;
-			if (huge_pte_none(huge_ptep_get(ptep)))
+			if (hugetlb_pte_none(hpte))
 				ret = vmf_error(PTR_ERR(page));
 			spin_unlock(ptl);
 			goto out;
@@ -5722,18 +5726,25 @@ retry:
 		vma_end_reservation(h, vma, haddr);
 	}
 
-	ptl = huge_pte_lock(h, mm, ptep);
+	ptl = hugetlb_pte_lock(mm, hpte);
 	ret = 0;
 	/* If pte changed from under us, retry */
-	if (!pte_same(huge_ptep_get(ptep), old_pte))
+	if (!pte_same(hugetlb_ptep_get(hpte), old_pte))
 		goto backout;
 
-	if (anon_rmap) {
-		ClearHPageRestoreReserve(page);
-		hugepage_add_new_anon_rmap(page, vma, haddr);
-	} else
-		page_dup_file_rmap(page, true);
-	new_pte = make_huge_pte(vma, page, ((vma->vm_flags & VM_WRITE)
+	if (new_mapping) {
+		/* Only increment this page's mapcount if we are mapping it
+		 * for the first time.
+		 */
+		if (anon_rmap) {
+			ClearHPageRestoreReserve(page);
+			hugepage_add_new_anon_rmap(page, vma, haddr);
+		} else
+			page_dup_file_rmap(page, true);
+	}
+
+	subpage = calculate_subpage(h, page, haddr_hgm);
+	new_pte = make_huge_pte(vma, subpage, ((vma->vm_flags & VM_WRITE)
 				&& (vma->vm_flags & VM_SHARED)));
 	/*
 	 * If this pte was previously wr-protected, keep it wr-protected even
@@ -5741,12 +5752,14 @@ retry:
 	 */
 	if (unlikely(pte_marker_uffd_wp(old_pte)))
 		new_pte = huge_pte_wrprotect(huge_pte_mkuffd_wp(new_pte));
-	set_huge_pte_at(mm, haddr, ptep, new_pte);
+	set_huge_pte_at(mm, haddr_hgm, hpte->ptep, new_pte);
 
-	hugetlb_count_add(pages_per_huge_page(h), mm);
+	hugetlb_count_add(hugetlb_pte_size(hpte) / PAGE_SIZE, mm);
 	if ((flags & FAULT_FLAG_WRITE) && !(vma->vm_flags & VM_SHARED)) {
+		//
+		BUG_ON(hugetlb_pte_size(hpte) != huge_page_size(h));
 		/* Optimization, do the COW without a second fault */
-		ret = hugetlb_wp(mm, vma, address, ptep, flags, page, ptl);
+		ret = hugetlb_wp(mm, vma, address, hpte->ptep, flags, page, ptl);
 	}
 
 	spin_unlock(ptl);
@@ -5807,11 +5820,15 @@ vm_fault_t hugetlb_fault(struct mm_struct *mm, struct vm_area_struct *vma,
 	u32 hash;
 	pgoff_t idx;
 	struct page *page = NULL;
+	struct page *subpage = NULL;
 	struct page *pagecache_page = NULL;
 	struct hstate *h = hstate_vma(vma);
 	struct address_space *mapping;
 	int need_wait_lock = 0;
 	unsigned long haddr = address & huge_page_mask(h);
+	unsigned long haddr_hgm;
+	bool hgm_enabled = hugetlb_hgm_enabled(vma);
+	struct hugetlb_pte hpte;
 
 	ptep = huge_pte_offset(mm, haddr, huge_page_size(h));
 	if (ptep) {
@@ -5857,11 +5874,22 @@ vm_fault_t hugetlb_fault(struct mm_struct *mm, struct vm_area_struct *vma,
 	hash = hugetlb_fault_mutex_hash(mapping, idx);
 	mutex_lock(&hugetlb_fault_mutex_table[hash]);
 
-	entry = huge_ptep_get(ptep);
+	hugetlb_pte_populate(&hpte, ptep, huge_page_shift(h));
+
+	if (hgm_enabled) {
+		ret = hugetlb_walk_to(mm, &hpte, address,
+				      PAGE_SIZE, /*stop_at_none=*/true);
+		if (ret) {
+			ret = vmf_error(ret);
+			goto out_mutex;
+		}
+	}
+
+	entry = hugetlb_ptep_get(&hpte);
 	/* PTE markers should be handled the same way as none pte */
-	if (huge_pte_none_mostly(entry)) {
-		ret = hugetlb_no_page(mm, vma, mapping, idx, address, ptep,
-				      entry, flags);
+	if (hugetlb_pte_none_mostly(&hpte)) {
+		ret = hugetlb_no_page(mm, vma, mapping, idx, address, &hpte,
+				entry, flags);
 		goto out_mutex;
 	}
 
@@ -5899,14 +5927,17 @@ vm_fault_t hugetlb_fault(struct mm_struct *mm, struct vm_area_struct *vma,
 								vma, haddr);
 	}
 
-	ptl = huge_pte_lock(h, mm, ptep);
+	ptl = hugetlb_pte_lock(mm, &hpte);
 
 	/* Check for a racing update before calling hugetlb_wp() */
-	if (unlikely(!pte_same(entry, huge_ptep_get(ptep))))
+	if (unlikely(!pte_same(entry, hugetlb_ptep_get(&hpte))))
 		goto out_ptl;
 
+	/* haddr_hgm is the base address of the region that hpte maps. */
+	haddr_hgm = address & hugetlb_pte_mask(&hpte);
+
 	/* Handle userfault-wp first, before trying to lock more pages */
-	if (userfaultfd_wp(vma) && huge_pte_uffd_wp(huge_ptep_get(ptep)) &&
+	if (userfaultfd_wp(vma) && huge_pte_uffd_wp(hugetlb_ptep_get(&hpte)) &&
 	    (flags & FAULT_FLAG_WRITE) && !huge_pte_write(entry)) {
 		struct vm_fault vmf = {
 			.vma = vma,
@@ -5930,7 +5961,8 @@ vm_fault_t hugetlb_fault(struct mm_struct *mm, struct vm_area_struct *vma,
 	 * pagecache_page, so here we need take the former one
 	 * when page != pagecache_page or !pagecache_page.
 	 */
-	page = pte_page(entry);
+	subpage = pte_page(entry);
+	page = compound_head(subpage);
 	if (page != pagecache_page)
 		if (!trylock_page(page)) {
 			need_wait_lock = 1;
@@ -5941,7 +5973,8 @@ vm_fault_t hugetlb_fault(struct mm_struct *mm, struct vm_area_struct *vma,
 
 	if (flags & (FAULT_FLAG_WRITE|FAULT_FLAG_UNSHARE)) {
 		if (!huge_pte_write(entry)) {
-			ret = hugetlb_wp(mm, vma, address, ptep, flags,
+			BUG_ON(hugetlb_pte_size(&hpte) != huge_page_size(h));
+			ret = hugetlb_wp(mm, vma, address, hpte.ptep, flags,
 					 pagecache_page, ptl);
 			goto out_put_page;
 		} else if (likely(flags & FAULT_FLAG_WRITE)) {
@@ -5949,9 +5982,9 @@ vm_fault_t hugetlb_fault(struct mm_struct *mm, struct vm_area_struct *vma,
 		}
 	}
 	entry = pte_mkyoung(entry);
-	if (huge_ptep_set_access_flags(vma, haddr, ptep, entry,
+	if (huge_ptep_set_access_flags(vma, haddr_hgm, hpte.ptep, entry,
 						flags & FAULT_FLAG_WRITE))
-		update_mmu_cache(vma, haddr, ptep);
+		update_mmu_cache(vma, haddr_hgm, hpte.ptep);
 out_put_page:
 	if (page != pagecache_page)
 		unlock_page(page);
@@ -6942,7 +6975,8 @@ pte_t *huge_pte_alloc(struct mm_struct *mm, struct vm_area_struct *vma,
 				pte = (pte_t *)pmd_alloc(mm, pud, addr);
 		}
 	}
-	BUG_ON(pte && pte_present(*pte) && !pte_huge(*pte));
+	if (!hugetlb_hgm_enabled(vma))
+		BUG_ON(pte && pte_present(*pte) && !pte_huge(*pte));
 
 	return pte;
 }
@@ -7043,6 +7077,36 @@ static unsigned int get_shift_for_hstate(struct hstate *h) {
 	for ((tmp_h) = hstate; (shift) = get_shift_for_hstate(tmp_h), \
 			       (tmp_h) <= &hstates[hugetlb_max_hstate]; \
 			       (tmp_h)++)
+
+/*
+ * Allocate a HugeTLB PTE that maps as much of [start, end) as possible with a
+ * single page table entry. The allocated HugeTLB PTE is returned in hpte.
+ */
+int hugetlb_alloc_largest_pte(struct hugetlb_pte *hpte, struct mm_struct *mm,
+			      struct vm_area_struct *vma, unsigned long start,
+			      unsigned long end)
+{
+	struct hstate *h = hstate_vma(vma), *tmp_h;
+	unsigned int shift;
+	int ret;
+	for_each_hgm_shift(h, tmp_h, shift) {
+		unsigned long sz = 1UL << shift;
+		if (!IS_ALIGNED(start, sz) || start + sz > end)
+			continue;
+		ret = huge_pte_alloc_high_granularity(hpte, mm, vma, start,
+						      shift, SPLIT_NONE,
+						      /*write_locked=*/false);
+		if (ret)
+			return ret;
+
+		if (hpte->shift > shift)
+			return -EEXIST;
+
+		BUG_ON(hpte->shift != shift);
+		return 0;
+	}
+	return -EINVAL;
+}
 
 /*
  * Given a particular address, split the HugeTLB PTE that currently maps it
