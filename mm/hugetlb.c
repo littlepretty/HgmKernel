@@ -6980,6 +6980,48 @@ pte_t *huge_pte_offset(struct mm_struct *mm,
 	return (pte_t *)pmd;
 }
 
+int hugetlb_walk_to(struct mm_struct *mm, struct hugetlb_pte *hpte,
+		    unsigned long addr, unsigned long sz, bool stop_at_none)
+{
+	pte_t *ptep;
+
+	if (!hpte->valid) {
+		pgd_t *pgd = pgd_offset(mm, addr);
+		if (!pgd)
+			return -ENOMEM;
+		ptep = (pte_t*)p4d_alloc(mm, pgd, addr);
+		if (!ptep)
+			return -ENOMEM;
+		hugetlb_pte_populate(hpte, ptep, P4D_SHIFT);
+	}
+
+	while (hugetlb_pte_size(hpte) > sz &&
+			!hugetlb_pte_present_leaf(hpte) &&
+			!(stop_at_none && hugetlb_pte_none(hpte))) {
+		if (hpte->shift == PMD_SHIFT) {
+			ptep = pte_alloc_map(mm, (pmd_t*)hpte->ptep, addr);
+			if (!ptep)
+				return -ENOMEM;
+			hpte->shift = PAGE_SHIFT;
+			hpte->ptep = ptep;
+		} else if (hpte->shift == PUD_SHIFT) {
+			ptep = (pte_t*)pmd_alloc(mm, (pud_t*)hpte->ptep, addr);
+			if (!ptep)
+				return -ENOMEM;
+			hpte->shift = PMD_SHIFT;
+			hpte->ptep = ptep;
+		} else if (hpte->shift == P4D_SHIFT) {
+			ptep = (pte_t*)pud_alloc(mm, (p4d_t*)hpte->ptep, addr);
+			if (!ptep)
+				return -ENOMEM;
+			hpte->shift = PUD_SHIFT;
+			hpte->ptep = ptep;
+		} else
+			BUG();
+	}
+	return 0;
+}
+
 #endif /* CONFIG_ARCH_WANT_GENERAL_HUGETLB */
 
 /*
