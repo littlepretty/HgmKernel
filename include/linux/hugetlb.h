@@ -91,6 +91,9 @@ void hugetlb_pte_copy(struct hugetlb_pte *dest, const struct hugetlb_pte *src) {
 	dest->valid = src->valid;
 }
 
+void hugetlb_free_range(struct mmu_gather *tlb, const struct hugetlb_pte *hpte,
+			unsigned long start, unsigned long end);
+
 struct hugepage_subpool {
 	spinlock_t lock;
 	long count;
