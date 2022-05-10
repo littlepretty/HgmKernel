@@ -6989,6 +6989,27 @@ __weak unsigned long hugetlb_mask_last_page(struct hstate *h)
 #endif /* CONFIG_ARCH_WANT_GENERAL_HUGETLB */
 
 /*
+ * Architectures should provide their own version if necessary to support
+ * high-granularity mapping without GENERAL_HUGETLB.
+ */
+__weak void hugetlb_free_range(struct mmu_gather *tlb, const struct hugetlb_pte *hpte,
+			unsigned long start, unsigned long end)
+{
+	unsigned long floor = start & hugetlb_pte_mask(hpte);
+	unsigned long ceiling = floor + hugetlb_pte_size(hpte);
+
+	if (hugetlb_pte_size(hpte) >= PGDIR_SIZE) {
+		free_p4d_range(tlb, (pgd_t *)hpte->ptep, start, end, floor, ceiling);
+	} else if (hugetlb_pte_size(hpte) >= P4D_SIZE) {
+		free_pud_range(tlb, (p4d_t *)hpte->ptep, start, end, floor, ceiling);
+	} else if (hugetlb_pte_size(hpte) >= PUD_SIZE) {
+		free_pmd_range(tlb, (pud_t *)hpte->ptep, start, end, floor, ceiling);
+	} else if (hugetlb_pte_size(hpte) >= PMD_SIZE) {
+		free_pte_range(tlb, (pmd_t *)hpte->ptep, start);
+	}
+}
+
+/*
  * These functions are overwritable if your architecture needs its own
  * behavior.
  */
