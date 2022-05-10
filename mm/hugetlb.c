@@ -111,6 +111,14 @@ struct mutex *hugetlb_fault_mutex_table ____cacheline_aligned_in_smp;
 /* Forward declaration */
 static int hugetlb_acct_memory(struct hstate *h, long delta);
 
+static struct page *calculate_subpage(struct hstate *h, struct page *hpage,
+				      unsigned long addr)
+{
+	size_t idx = (addr & ~huge_page_mask(h))/PAGE_SIZE;
+	BUG_ON(idx >= pages_per_huge_page(h));
+	return &hpage[idx];
+}
+
 static inline bool subpool_is_free(struct hugepage_subpool *spool)
 {
 	if (spool->count)
@@ -7042,6 +7050,86 @@ static unsigned int get_shift_for_hstate(struct hstate *h) {
 	for ((tmp_h) = hstate; (shift) = get_shift_for_hstate(tmp_h), \
 			       (tmp_h) <= &hstates[hugetlb_max_hstate]; \
 			       (tmp_h)++)
+
+static int hugetlb_split_to_shift(struct mm_struct *mm, struct vm_area_struct *vma,
+			   const struct hugetlb_pte *hpte,
+			   unsigned long addr, unsigned long desired_shift)
+{
+	unsigned long start, end, curr;
+	unsigned long desired_sz = 1UL << desired_shift;
+	struct hstate *h = hstate_vma(vma);
+	int ret;
+	struct hugetlb_pte new_hpte;
+	struct mmu_notifier_range range;
+	struct page *hpage = NULL;
+	struct page *subpage;
+	pte_t old_entry;
+	struct mmu_gather tlb;
+
+	BUG_ON(!hpte->valid);
+	BUG_ON(hugetlb_pte_size(hpte) == desired_sz);
+
+	start = addr & hugetlb_pte_mask(hpte);
+	end = start + hugetlb_pte_size(hpte);
+
+	// PTL must be locked, and mapping lock must be write-locked.
+	i_mmap_assert_write_locked(vma->vm_file->f_mapping);
+
+	BUG_ON(!hpte->ptep);
+	BUG_ON(!hugetlb_pte_present_leaf(hpte));
+
+	old_entry = huge_ptep_get_and_clear(mm, start, hpte->ptep);
+
+	if (!huge_pte_none(old_entry))
+		hpage = pte_page(old_entry);
+
+	BUG_ON(!IS_ALIGNED(start, desired_sz));
+	BUG_ON(!IS_ALIGNED(end, desired_sz));
+
+	for (curr = start; curr < end;) {
+		struct hstate *tmp_h;
+		unsigned int shift;
+		for_each_hgm_shift(h, tmp_h, shift) {
+			unsigned long sz = 1UL << shift;
+			if (!IS_ALIGNED(curr, sz) || curr + sz > end)
+				continue;
+			if (curr <= addr && curr + sz > addr && shift > desired_shift)
+				continue;
+			hugetlb_pte_copy(&new_hpte, hpte);
+			ret = hugetlb_walk_to(mm, &new_hpte, curr, sz,
+					      /*stop_at_none=*/false);
+			if (ret)
+				goto err;
+			BUG_ON(hugetlb_pte_size(&new_hpte) != sz);
+			if (hpage) {
+				pte_t new_entry;
+				subpage = calculate_subpage(h, hpage, curr);
+				new_entry = make_huge_pte_with_shift(vma, subpage,
+								     huge_pte_write(old_entry),
+								     shift);
+				set_huge_pte_at(mm, curr, new_hpte.ptep, new_entry);
+			}
+			curr += sz;
+			goto next;
+		}
+		// We couldn't find a size that worked.
+		BUG();
+next:
+		continue;
+	}
+
+	mmu_notifier_range_init(&range, MMU_NOTIFY_CLEAR, 0, vma, vma->vm_mm,
+				start, end);
+	mmu_notifier_invalidate_range_start(&range);
+	return 0;
+err:
+	tlb_gather_mmu(&tlb, mm);
+	hugetlb_free_range(&tlb, hpte, start, curr);
+	// Restore the old entry.
+	set_huge_pte_at(mm, start, hpte->ptep, old_entry);
+	tlb_finish_mmu(&tlb);
+	return ret;
+}
 #endif /* CONFIG_HUGETLB_HIGH_GRANULARITY_MAPPING */
 
 /*
