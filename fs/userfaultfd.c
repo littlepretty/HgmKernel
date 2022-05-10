@@ -242,17 +242,17 @@ static inline bool userfaultfd_huge_must_wait(struct userfaultfd_ctx *ctx,
 					 unsigned long flags,
 					 unsigned long reason)
 {
-	pte_t *ptep, pte;
+	pte_t pte;
 	bool ret = true;
+	struct hugetlb_pte hpte;
 
 	mmap_assert_locked(ctx->mm);
 
-	ptep = hugetlb_walk(vma, address, vma_mmu_pagesize(vma));
-	if (!ptep)
+	if (hugetlb_full_walk(&hpte, vma, address))
 		goto out;
 
 	ret = false;
-	pte = huge_ptep_get(ptep);
+	pte = huge_ptep_get(hpte.ptep);
 
 	/*
 	 * Lockless access: we're in a wait_event so it's ok if it
@@ -521,11 +521,11 @@ vm_fault_t handle_userfault(struct vm_fault *vmf, unsigned long reason)
 	spin_unlock_irq(&ctx->fault_pending_wqh.lock);
 
 	if (!is_vm_hugetlb_page(vma))
-		must_wait = userfaultfd_must_wait(ctx, vmf->address, vmf->flags,
-						  reason);
+		must_wait = userfaultfd_must_wait(ctx, vmf->real_address,
+						  vmf->flags, reason);
 	else
 		must_wait = userfaultfd_huge_must_wait(ctx, vma,
-						       vmf->address,
+						       vmf->real_address,
 						       vmf->flags, reason);
 	if (is_vm_hugetlb_page(vma))
 		hugetlb_vma_unlock_read(vma);
@@ -1473,6 +1473,17 @@ static int userfaultfd_register(struct userfaultfd_ctx *ctx,
 			mas_pause(&mas);
 		}
 	next:
+		if (is_vm_hugetlb_page(vma) && (ctx->features &
+					UFFD_FEATURE_MINOR_HUGETLBFS_HGM)) {
+			ret = enable_hugetlb_hgm(vma);
+			if (ret)
+				break;
+			/*
+			 * enable_hugetlb_hgm changes the VMA flags, so we need
+			 * to recompute them.
+			 */
+			new_flags = (vma->vm_flags & ~__VM_UFFD_FLAGS) | vm_flags;
+		}
 		/*
 		 * In the vma_merge() successful mprotect-like case 8:
 		 * the next vma was merged into the current one and
