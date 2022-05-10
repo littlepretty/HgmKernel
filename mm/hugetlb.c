@@ -1137,6 +1137,45 @@ void hugetlb_free_range(struct mmu_gather *tlb, const struct hugetlb_pte *hpte,
 	}
 }
 
+bool hugetlb_pte_present_leaf(const struct hugetlb_pte *hpte)
+{
+	pgd_t pgd;
+	p4d_t p4d;
+	pud_t pud;
+	pmd_t pmd;
+
+	BUG_ON(!hpte->ptep);
+	if (hugetlb_pte_size(hpte) >= PGDIR_SIZE) {
+		pgd = *(pgd_t *)hpte->ptep;
+		return pgd_present(pgd) && pgd_leaf(pgd);
+	} else if (hugetlb_pte_size(hpte) >= P4D_SIZE) {
+		p4d = *(p4d_t *)hpte->ptep;
+		return p4d_present(p4d) && p4d_leaf(p4d);
+	} else if (hugetlb_pte_size(hpte) >= PUD_SIZE) {
+		pud = *(pud_t *)hpte->ptep;
+		return pud_present(pud) && pud_leaf(pud);
+	} else if (hugetlb_pte_size(hpte) >= PMD_SIZE) {
+		pmd = *(pmd_t *)hpte->ptep;
+		return pmd_present(pmd) && pmd_leaf(pmd);
+	} else if (hugetlb_pte_size(hpte) >= PAGE_SIZE)
+		return pte_present(*hpte->ptep);
+	BUG();
+}
+
+bool hugetlb_pte_none(const struct hugetlb_pte *hpte)
+{
+	if (hugetlb_pte_huge(hpte))
+		return huge_pte_none(huge_ptep_get(hpte->ptep));
+	return pte_none(ptep_get(hpte->ptep));
+}
+
+bool hugetlb_pte_none_mostly(const struct hugetlb_pte *hpte)
+{
+	if (hugetlb_pte_huge(hpte))
+		return huge_pte_none_mostly(huge_ptep_get(hpte->ptep));
+	return pte_none_mostly(ptep_get(hpte->ptep));
+}
+
 static void enqueue_huge_page(struct hstate *h, struct page *page)
 {
 	int nid = page_to_nid(page);
