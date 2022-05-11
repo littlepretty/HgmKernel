@@ -35,6 +35,7 @@
 #include <linux/delayacct.h>
 #include <linux/sort.h>
 #include <linux/mman.h>
+#include <linux/sort.h>
 
 #include <asm/page.h>
 #include <asm/pgalloc.h>
@@ -7117,6 +7118,16 @@ int hugetlb_walk_to(struct mm_struct *mm, struct hugetlb_pte *hpte,
 #endif /* CONFIG_ARCH_WANT_GENERAL_HUGETLB */
 
 #ifdef CONFIG_HUGETLB_HIGH_GRANULARITY_MAPPING
+int hugetlb_hgm_init(struct vm_area_struct *vma)
+{
+	struct hugetlb_vma_priv *hvp = get_vma_private_data(vma);
+	// High-granularity mapping is only supported for shared mappings.
+	if (!(vma->vm_flags & VM_SHARED))
+		return -EINVAL;
+
+	hvp->high_granularity_supported = true;
+	return 0;
+}
 bool hugetlb_hgm_enabled(struct vm_area_struct *vma)
 {
 	return get_vma_private_data(vma)->high_granularity_supported;
