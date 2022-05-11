@@ -32,6 +32,7 @@
 #include <linux/cma.h>
 #include <linux/migrate.h>
 #include <linux/mman.h>
+#include <linux/sort.h>
 
 #include <asm/page.h>
 #include <asm/pgalloc.h>
@@ -6869,6 +6870,49 @@ int hugetlb_walk_to(struct mm_struct *mm, struct hugetlb_pte *hpte,
 #endif /* CONFIG_ARCH_WANT_GENERAL_HUGETLB */
 
 #ifdef CONFIG_HUGETLB_DOUBLE_MAP
+static int compare_shifts(const void *a, const void *b)
+{
+	const int *shift_a = a;
+	const int *shift_b = b;
+	if (*shift_a < *shift_b)
+		return 1;
+	if (*shift_a > *shift_b)
+		return -1;
+	return 0;
+}
+int hugetlb_hgm_init(struct vm_area_struct *vma)
+{
+	struct hugetlb_vma_priv *hvp = get_vma_private_data(vma);
+	unsigned int shift = huge_page_shift(hstate_vma(vma));
+	int shifts_num = 0;
+	int *shifts;
+	size_t idx;
+	struct hstate *h;
+	BUG_ON(!hvp);
+	BUG_ON(hvp->double_mapped_shifts);
+	for_each_hstate(h) {
+		if (huge_page_shift(h) <= shift)
+			shifts_num++;
+	}
+	shifts = kmalloc(sizeof(*shifts) * (shifts_num + 1), GFP_KERNEL);
+	if (!shifts)
+		return -ENOMEM;
+
+	idx = 0;
+	for_each_hstate(h) {
+		if (huge_page_shift(h) <= shift)
+			shifts[idx++] = huge_page_shift(h);
+	}
+	shifts[idx++] = PAGE_SHIFT;
+
+	// Sort the shifts largest first.
+	sort(shifts, idx, sizeof(*shifts), compare_shifts, NULL);
+
+	hvp->double_mapped_shifts_num = idx;
+	hvp->double_mapped_shifts = shifts;
+	return 0;
+}
+
 bool hugetlb_hgm_enabled(struct vm_area_struct *vma)
 {
 	return get_vma_private_data(vma)->double_mapped_shifts_num > 0;
