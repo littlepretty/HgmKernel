@@ -1794,6 +1794,14 @@ unsigned long mmap_region(struct file *file, unsigned long addr,
 		if (error)
 			goto unmap_and_free_vma;
 
+#ifdef CONFIG_HUGETLB_DOUBLE_MAP
+		if (is_vm_hugetlb_page(vma) && (vm_flags & VM_SHARED)) {
+			error = hugetlb_hgm_init(vma);
+			if (error)
+				goto unmap_and_free_vma;
+		}
+#endif
+
 		/* Can addr have changed??
 		 *
 		 * Answer: Yes, several device drivers can do it in their
