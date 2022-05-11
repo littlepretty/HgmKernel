@@ -6800,15 +6800,15 @@ unsigned long hugetlb_change_protection(struct vm_area_struct *vma,
 {
 	struct mm_struct *mm = vma->vm_mm;
 	unsigned long start = address;
-	pte_t *ptep;
 	pte_t pte;
 	struct hstate *h = hstate_vma(vma);
-	unsigned long pages = 0, psize = huge_page_size(h);
+	unsigned long base_pages = 0, psize = huge_page_size(h);
 	bool shared_pmd = false;
 	struct mmu_notifier_range range;
 	unsigned long last_addr_mask;
 	bool uffd_wp = cp_flags & MM_CP_UFFD_WP;
 	bool uffd_wp_resolve = cp_flags & MM_CP_UFFD_WP_RESOLVE;
+	struct hugetlb_pte hpte;
 
 	/*
 	 * In the case of shared PMDs, the area to flush could be beyond
@@ -6826,31 +6826,33 @@ unsigned long hugetlb_change_protection(struct vm_area_struct *vma,
 	hugetlb_vma_lock_write(vma);
 	i_mmap_lock_write(vma->vm_file->f_mapping);
 	last_addr_mask = hugetlb_mask_last_page(h);
-	for (; address < end; address += psize) {
+	while (address < end) {
 		spinlock_t *ptl;
-		ptep = hugetlb_walk(vma, address, psize);
-		if (!ptep) {
-			address |= last_addr_mask;
+
+		if (hugetlb_full_walk(&hpte, vma, address)) {
+			address = (address | last_addr_mask) + psize;
 			continue;
 		}
-		ptl = huge_pte_lock(h, mm, ptep);
-		if (huge_pmd_unshare(mm, vma, address, ptep)) {
+
+		ptl = hugetlb_pte_lock(&hpte);
+		if (hugetlb_pte_size(&hpte) == psize &&
+		    huge_pmd_unshare(mm, vma, address, hpte.ptep)) {
 			/*
 			 * When uffd-wp is enabled on the vma, unshare
 			 * shouldn't happen at all.  Warn about it if it
 			 * happened due to some reason.
 			 */
 			WARN_ON_ONCE(uffd_wp || uffd_wp_resolve);
-			pages++;
+			base_pages += psize / PAGE_SIZE;
 			spin_unlock(ptl);
 			shared_pmd = true;
-			address |= last_addr_mask;
+			address = (address | last_addr_mask) + psize;
 			continue;
 		}
-		pte = huge_ptep_get(ptep);
+		pte = huge_ptep_get(hpte.ptep);
 		if (unlikely(is_hugetlb_entry_hwpoisoned(pte))) {
 			spin_unlock(ptl);
-			continue;
+			goto next_hpte;
 		}
 		if (unlikely(is_hugetlb_entry_migration(pte))) {
 			swp_entry_t entry = pte_to_swp_entry(pte);
@@ -6870,11 +6872,11 @@ unsigned long hugetlb_change_protection(struct vm_area_struct *vma,
 					newpte = pte_swp_mkuffd_wp(newpte);
 				else if (uffd_wp_resolve)
 					newpte = pte_swp_clear_uffd_wp(newpte);
-				set_huge_pte_at(mm, address, ptep, newpte);
-				pages++;
+				set_huge_pte_at(mm, address, hpte.ptep, newpte);
+				base_pages += hugetlb_pte_size(&hpte) / PAGE_SIZE;
 			}
 			spin_unlock(ptl);
-			continue;
+			goto next_hpte;
 		}
 		if (unlikely(pte_marker_uffd_wp(pte))) {
 			/*
@@ -6882,21 +6884,35 @@ unsigned long hugetlb_change_protection(struct vm_area_struct *vma,
 			 * no need for huge_ptep_modify_prot_start/commit().
 			 */
 			if (uffd_wp_resolve)
-				huge_pte_clear(mm, address, ptep, psize);
+				huge_pte_clear(mm, address, hpte.ptep,
+						hugetlb_pte_size(&hpte));
 		}
 		if (!huge_pte_none(pte)) {
 			pte_t old_pte;
-			unsigned int shift = huge_page_shift(hstate_vma(vma));
+			unsigned int shift = hpte.shift;
 
-			old_pte = huge_ptep_modify_prot_start(vma, address, ptep);
+			if (unlikely(!hugetlb_pte_present_leaf(&hpte, pte))) {
+				/*
+				 * Someone split the PTE from under us, so retry
+				 * the walk,
+				 */
+				spin_unlock(ptl);
+				continue;
+			}
+
+			old_pte = huge_ptep_modify_prot_start(
+					vma, address, hpte.ptep);
 			pte = huge_pte_modify(old_pte, newprot);
-			pte = arch_make_huge_pte(pte, shift, vma->vm_flags);
+			pte = arch_make_huge_pte(
+					pte, shift, vma->vm_flags);
 			if (uffd_wp)
 				pte = huge_pte_mkuffd_wp(pte);
 			else if (uffd_wp_resolve)
 				pte = huge_pte_clear_uffd_wp(pte);
-			huge_ptep_modify_prot_commit(vma, address, ptep, old_pte, pte);
-			pages++;
+			huge_ptep_modify_prot_commit(
+					vma, address, hpte.ptep,
+					old_pte, pte);
+			base_pages += hugetlb_pte_size(&hpte) / PAGE_SIZE;
 		} else {
 			/* None pte */
 			if (unlikely(uffd_wp))
@@ -6905,6 +6921,8 @@ unsigned long hugetlb_change_protection(struct vm_area_struct *vma,
 						make_pte_marker(PTE_MARKER_UFFD_WP));
 		}
 		spin_unlock(ptl);
+next_hpte:
+		address += hugetlb_pte_size(&hpte);
 	}
 	/*
 	 * Must flush TLB before releasing i_mmap_rwsem: x86's huge_pmd_unshare
@@ -6927,7 +6945,7 @@ unsigned long hugetlb_change_protection(struct vm_area_struct *vma,
 	hugetlb_vma_unlock_write(vma);
 	mmu_notifier_invalidate_range_end(&range);
 
-	return pages << h->order;
+	return base_pages;
 }
 
 /* Return true if reservation was successful, false otherwise.  */
