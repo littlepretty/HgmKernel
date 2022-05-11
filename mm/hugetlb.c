@@ -5029,24 +5029,20 @@ static void __unmap_hugepage_range(struct mmu_gather *tlb, struct vm_area_struct
 {
 	struct mm_struct *mm = vma->vm_mm;
 	unsigned long address;
-	pte_t *ptep;
+	struct hugetlb_pte hpte;
 	pte_t pte;
 	spinlock_t *ptl;
-	struct page *page;
+	struct page *hpage, *subpage;
 	struct hstate *h = hstate_vma(vma);
 	unsigned long sz = huge_page_size(h);
 	struct mmu_notifier_range range;
 	bool force_flush = false;
+	bool hgm_enabled = hugetlb_hgm_enabled(vma);
 
 	WARN_ON(!is_vm_hugetlb_page(vma));
 	BUG_ON(start & ~huge_page_mask(h));
 	BUG_ON(end & ~huge_page_mask(h));
 
-	/*
-	 * This is a hugetlb vma, all the pte entries should point
-	 * to huge page.
-	 */
-	tlb_change_page_size(tlb, sz);
 	tlb_start_vma(tlb, vma);
 
 	/*
@@ -5057,20 +5053,34 @@ static void __unmap_hugepage_range(struct mmu_gather *tlb, struct vm_area_struct
 	adjust_range_if_pmd_sharing_possible(vma, &range.start, &range.end);
 	mmu_notifier_invalidate_range_start(&range);
 	address = start;
-	for (; address < end; address += sz) {
-		ptep = huge_pte_offset(mm, address, sz);
-		if (!ptep)
+
+	for (address = start; address < end;
+			// hugetlb_pte_size(&hpte) may change if HGM is enabled,
+			// but it will always be valid.
+			address += hugetlb_pte_size(&hpte)) {
+		if (hgm_enabled) {
+			int ret = huge_pte_alloc_high_granularity(
+					&hpte, mm, vma, address, PAGE_SHIFT,
+					SPLIT_NEVER, /*write_locked=*/true);
+			BUG_ON(ret);
+		} else {
+			hpte.ptep = huge_pte_offset(mm, address, sz);
+			hpte.shift = huge_page_shift(h);
+			hpte.valid = true;
+		}
+
+		if (!hpte.ptep)
 			continue;
 
-		ptl = huge_pte_lock(h, mm, ptep);
-		if (huge_pmd_unshare(mm, vma, &address, ptep)) {
+		ptl = hugetlb_pte_lock(mm, &hpte);
+		if (huge_pmd_unshare(mm, vma, &address, hpte.ptep)) {
 			spin_unlock(ptl);
 			tlb_flush_pmd_range(tlb, address & PUD_MASK, PUD_SIZE);
 			force_flush = true;
 			continue;
 		}
 
-		pte = huge_ptep_get(ptep);
+		pte = huge_ptep_get(hpte.ptep);
 		if (huge_pte_none(pte)) {
 			spin_unlock(ptl);
 			continue;
@@ -5081,19 +5091,28 @@ static void __unmap_hugepage_range(struct mmu_gather *tlb, struct vm_area_struct
 		 * unmapped and its refcount is dropped, so just clear pte here.
 		 */
 		if (unlikely(!pte_present(pte))) {
-			huge_pte_clear(mm, address, ptep, sz);
+			if (hugetlb_pte_size(&hpte) > PAGE_SIZE)
+				huge_pte_clear(mm, address, hpte.ptep,
+					       hugetlb_pte_size(&hpte));
+			else {
+				BUG_ON(hugetlb_pte_size(&hpte) != PAGE_SIZE);
+				pte_clear(mm, address, hpte.ptep);
+			}
 			spin_unlock(ptl);
 			continue;
 		}
 
-		page = pte_page(pte);
+		subpage = pte_page(pte);
+		hpage = compound_head(subpage);
 		/*
 		 * If a reference page is supplied, it is because a specific
 		 * page is being unmapped, not a range. Ensure the page we
 		 * are about to unmap is the actual page of interest.
 		 */
 		if (ref_page) {
-			if (page != ref_page) {
+			// We only support refpages that are head pages.
+			BUG_ON(hpage != subpage);
+			if (hpage != ref_page) {
 				spin_unlock(ptl);
 				continue;
 			}
@@ -5105,16 +5124,21 @@ static void __unmap_hugepage_range(struct mmu_gather *tlb, struct vm_area_struct
 			set_vma_resv_flags(vma, HPAGE_RESV_UNMAPPED);
 		}
 
-		pte = huge_ptep_get_and_clear(mm, address, ptep);
-		tlb_remove_huge_tlb_entry(h, tlb, ptep, address);
+		pte = huge_ptep_get_and_clear(mm, address, hpte.ptep);
+		tlb_change_page_size(tlb, hugetlb_pte_size(&hpte));
+		tlb_remove_huge_tlb_entry(tlb, hpte, address);
 		if (huge_pte_dirty(pte))
-			set_page_dirty(page);
+			set_page_dirty(hpage);
 
-		hugetlb_count_sub(pages_per_huge_page(h), mm);
-		page_remove_rmap(page, vma, true);
+		hugetlb_count_sub(hugetlb_pte_size(&hpte)/PAGE_SIZE, mm);
+
+		// If we are unmapping the entire page, remove it from the
+		// rmap.
+		if (IS_ALIGNED(address, sz) && address + sz <= end)
+			page_remove_rmap(hpage, vma, true);
 
 		spin_unlock(ptl);
-		tlb_remove_page_size(tlb, page, huge_page_size(h));
+		tlb_remove_page_size(tlb, subpage, hugetlb_pte_size(&hpte));
 		/*
 		 * Bail out after unmapping reference page if supplied
 		 */
