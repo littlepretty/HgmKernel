@@ -5128,24 +5128,20 @@ static void __unmap_hugepage_range(struct mmu_gather *tlb, struct vm_area_struct
 {
 	struct mm_struct *mm = vma->vm_mm;
 	unsigned long address;
-	pte_t *ptep;
+	struct hugetlb_pte hpte;
 	pte_t pte;
 	spinlock_t *ptl;
-	struct page *page;
+	struct page *hpage, *subpage;
 	struct hstate *h = hstate_vma(vma);
 	unsigned long sz = huge_page_size(h);
 	struct mmu_notifier_range range;
 	bool force_flush = false;
+	bool hgm_enabled = hugetlb_hgm_enabled(vma);
 
 	WARN_ON(!is_vm_hugetlb_page(vma));
 	BUG_ON(start & ~huge_page_mask(h));
 	BUG_ON(end & ~huge_page_mask(h));
 
-	/*
-	 * This is a hugetlb vma, all the pte entries should point
-	 * to huge page.
-	 */
-	tlb_change_page_size(tlb, sz);
 	tlb_start_vma(tlb, vma);
 
 	/*
@@ -5156,23 +5152,36 @@ static void __unmap_hugepage_range(struct mmu_gather *tlb, struct vm_area_struct
 	adjust_range_if_pmd_sharing_possible(vma, &range.start, &range.end);
 	mmu_notifier_invalidate_range_start(&range);
 	address = start;
-	for (; address < end; address += sz) {
-		ptep = huge_pte_offset(mm, address, sz);
-		if (!ptep)
-			continue;
 
-		ptl = huge_pte_lock(h, mm, ptep);
-		if (huge_pmd_unshare(mm, vma, &address, ptep)) {
+	while (address < end) {
+		pte_t *ptep = huge_pte_offset(mm, address, sz);
+
+		if (!ptep) {
+			address += sz;
+			continue;
+		}
+		hugetlb_pte_populate(&hpte, ptep, huge_page_shift(h));
+		if (hgm_enabled) {
+			int ret = huge_pte_alloc_high_granularity(
+					&hpte, mm, vma, address, PAGE_SHIFT,
+					SPLIT_NEVER, /*write_locked=*/true);
+			// We will never split anything, so this should always
+			// succeed.
+			BUG_ON(ret);
+		}
+
+		ptl = hugetlb_pte_lock(mm, &hpte);
+		if (huge_pmd_unshare(mm, vma, &address, hpte.ptep)) {
 			spin_unlock(ptl);
 			tlb_flush_pmd_range(tlb, address & PUD_MASK, PUD_SIZE);
 			force_flush = true;
-			continue;
+			goto next_hpte;
 		}
 
-		pte = huge_ptep_get(ptep);
+		pte = huge_ptep_get(hpte.ptep);
 		if (huge_pte_none(pte)) {
 			spin_unlock(ptl);
-			continue;
+			goto next_hpte;
 		}
 
 		/*
@@ -5188,24 +5197,26 @@ static void __unmap_hugepage_range(struct mmu_gather *tlb, struct vm_area_struct
 			 */
 			if (pte_swp_uffd_wp_any(pte) &&
 			    !(zap_flags & ZAP_FLAG_DROP_MARKER))
-				set_huge_pte_at(mm, address, ptep,
+				set_huge_pte_at(mm, address, hpte.ptep,
 						make_pte_marker(PTE_MARKER_UFFD_WP));
 			else
-				huge_pte_clear(mm, address, ptep, sz);
+				huge_pte_clear(mm, address, hpte.ptep,
+						hugetlb_pte_size(&hpte));
 			spin_unlock(ptl);
-			continue;
+			goto next_hpte;
 		}
 
-		page = pte_page(pte);
+		subpage = pte_page(pte);
+		hpage = compound_head(subpage);
 		/*
 		 * If a reference page is supplied, it is because a specific
 		 * page is being unmapped, not a range. Ensure the page we
 		 * are about to unmap is the actual page of interest.
 		 */
 		if (ref_page) {
-			if (page != ref_page) {
+			if (hpage != ref_page) {
 				spin_unlock(ptl);
-				continue;
+				goto next_hpte;
 			}
 			/*
 			 * Mark the VMA as having unmapped its page so that
@@ -5215,25 +5226,33 @@ static void __unmap_hugepage_range(struct mmu_gather *tlb, struct vm_area_struct
 			set_vma_resv_flags(vma, HPAGE_RESV_UNMAPPED);
 		}
 
-		pte = huge_ptep_get_and_clear(mm, address, ptep);
-		tlb_remove_huge_tlb_entry(h, tlb, ptep, address);
+		pte = huge_ptep_get_and_clear(mm, address, hpte.ptep);
+		tlb_change_page_size(tlb, hugetlb_pte_size(&hpte));
+		tlb_remove_huge_tlb_entry(tlb, hpte, address);
 		if (huge_pte_dirty(pte))
-			set_page_dirty(page);
+			set_page_dirty(hpage);
 		/* Leave a uffd-wp pte marker if needed */
 		if (huge_pte_uffd_wp(pte) &&
 		    !(zap_flags & ZAP_FLAG_DROP_MARKER))
-			set_huge_pte_at(mm, address, ptep,
+			set_huge_pte_at(mm, address, hpte.ptep,
 					make_pte_marker(PTE_MARKER_UFFD_WP));
-		hugetlb_count_sub(pages_per_huge_page(h), mm);
-		page_remove_rmap(page, vma, true);
+
+		hugetlb_count_sub(hugetlb_pte_size(&hpte)/PAGE_SIZE, mm);
+
+		// If we are unmapping the entire page, remove it from the
+		// rmap.
+		if (IS_ALIGNED(address, sz) && address + sz <= end)
+			page_remove_rmap(hpage, vma, true);
 
 		spin_unlock(ptl);
-		tlb_remove_page_size(tlb, page, huge_page_size(h));
+		tlb_remove_page_size(tlb, subpage, hugetlb_pte_size(&hpte));
 		/*
 		 * Bail out after unmapping reference page if supplied
 		 */
 		if (ref_page)
 			break;
+next_hpte:
+		address += hugetlb_pte_size(&hpte);
 	}
 	mmu_notifier_invalidate_range_end(&range);
 	tlb_end_vma(tlb, vma);
