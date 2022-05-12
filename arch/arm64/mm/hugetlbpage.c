@@ -281,6 +281,63 @@ void set_huge_swap_pte_at(struct mm_struct *mm, unsigned long addr,
 		set_pte(ptep, pte);
 }
 
+int hugetlb_walk_to(struct mm_struct *mm, struct hugetlb_pte *hpte,
+		    unsigned long addr, unsigned long sz, bool stop_at_none)
+{
+	pgd_t *pgdp;
+	p4d_t *p4dp;
+	pte_t *ptep;
+
+	if (!hpte->valid) {
+		pgdp = pgd_offset(mm, addr);
+		p4dp = p4d_offset(pgdp, addr);
+		if (!p4dp)
+			return -ENOMEM;
+		hugetlb_pte_populate(hpte, (pte_t*)p4dp, P4D_SHIFT);
+	}
+
+	while (hugetlb_pte_size(hpte) > sz &&
+			!hugetlb_pte_present_leaf(hpte) &&
+			!(stop_at_none && hugetlb_pte_none(hpte))) {
+		if (hpte->shift == PMD_SHIFT) {
+			unsigned long rounded_addr = sz == CONT_PTE_SIZE
+						     ? addr & CONT_PTE_MASK
+						     : addr;
+			ptep = pte_offset_kernel((pmd_t*)hpte->ptep,
+						 rounded_addr);
+			if (!ptep)
+				return -ENOMEM;
+			if (sz == CONT_PTE_SIZE)
+				hpte->shift = CONT_PTE_SHIFT;
+			else
+				hpte->shift = pte_cont(*ptep) ? CONT_PTE_SHIFT : PAGE_SHIFT;
+			hpte->ptep = ptep;
+		} else if (hpte->shift == PUD_SHIFT) {
+			pud_t *pudp = (pud_t*)hpte->ptep;
+			ptep = (pte_t*)pmd_alloc(mm, pudp, addr);
+
+			if (!ptep)
+				return -ENOMEM;
+			if (sz == CONT_PMD_SIZE)
+				hpte->shift = CONT_PMD_SHIFT;
+			else
+				hpte->shift = pte_cont(*ptep) ? CONT_PMD_SHIFT : PMD_SHIFT;
+			hpte->ptep = ptep;
+		} else if (hpte->shift == P4D_SHIFT) {
+			ptep = (pte_t*)pud_alloc(mm, (p4d_t*)hpte->ptep, addr);
+			if (!ptep)
+				return -ENOMEM;
+			hpte->shift = PUD_SHIFT;
+			hpte->ptep = ptep;
+		} else
+			// This also catches the cases of CONT_PMD_SHIFT and CONT_PTE_SHIFT.
+			// Those PTEs should always be leaves.
+			BUG();
+	}
+
+	return 0;
+}
+
 pte_t *huge_pte_alloc(struct mm_struct *mm, struct vm_area_struct *vma,
 		      unsigned long addr, unsigned long sz)
 {
