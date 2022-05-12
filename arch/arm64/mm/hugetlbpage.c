@@ -284,6 +284,69 @@ void set_huge_pte_at(struct mm_struct *mm, unsigned long addr,
 		set_pte_at(mm, addr, ptep, pfn_pte(pfn, hugeprot));
 }
 
+int hugetlb_walk_step(struct mm_struct *mm, struct hugetlb_pte *hpte,
+		      unsigned long addr, unsigned long sz)
+{
+	unsigned int shift;
+	unsigned long rounded_addr;
+	pmd_t *cont_pmdp;
+	pmd_t *pmdp;
+	pte_t *cont_ptep;
+	pte_t *ptep;
+	spinlock_t *ptl;
+
+	switch(hpte->level) {
+		case HUGETLB_LEVEL_PUD:
+			rounded_addr = addr & CONT_PMD_MASK;
+			pmdp = hugetlb_pmd_alloc(mm, hpte, addr);
+			cont_pmdp = hugetlb_pmd_alloc(mm, hpte, rounded_addr);
+			if (IS_ERR(pmdp))
+				return PTR_ERR(pmdp);
+			if (IS_ERR(cont_pmdp))
+				return PTR_ERR(cont_pmdp);
+			if (sz == CONT_PMD_SIZE) {
+				if (pmd_present(*cont_pmdp) && !pmd_cont(*cont_pmdp))
+					return -EINVAL;
+				shift = CONT_PMD_SHIFT;
+				ptep = (pte_t *)cont_pmdp;
+			} else if (pmd_present(*cont_pmdp) && pmd_cont(*cont_pmdp))
+				return -EEXIST;
+			else {
+				shift = PMD_SHIFT;
+				ptep = (pte_t *)pmdp;
+			}
+			hugetlb_pte_populate(hpte, ptep, shift,
+					HUGETLB_LEVEL_PMD);
+			break;
+		case HUGETLB_LEVEL_PMD:
+			rounded_addr = addr & CONT_PTE_MASK;
+			ptep = hugetlb_pte_alloc(mm, hpte, addr);
+			cont_ptep = hugetlb_pte_alloc(mm, hpte, rounded_addr);
+			if (IS_ERR(ptep))
+				return PTR_ERR(ptep);
+			if (IS_ERR(cont_ptep))
+				return PTR_ERR(cont_ptep);
+			if (sz == CONT_PTE_SIZE) {
+				if (pte_present(*cont_ptep) && !pte_cont(*cont_ptep))
+					return -EINVAL;
+				shift = CONT_PTE_SHIFT;
+				ptep = cont_ptep;
+			} else if (pte_present(*cont_ptep) && pte_cont(*cont_ptep))
+				return -EEXIST;
+			else
+				shift = PAGE_SHIFT;
+
+			ptl = pte_lockptr(mm, (pmd_t *)hpte->ptep);
+			hugetlb_pte_populate(hpte, ptep, shift,
+					HUGETLB_LEVEL_PTE);
+			hpte->ptl = ptl;
+			break;
+		default:
+			BUG();
+	}
+	return 0;
+}
+
 pte_t *huge_pte_alloc(struct mm_struct *mm, struct vm_area_struct *vma,
 		      unsigned long addr, unsigned long sz)
 {
