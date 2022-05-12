@@ -284,6 +284,77 @@ void set_huge_pte_at(struct mm_struct *mm, unsigned long addr,
 		set_pte_at(mm, addr, ptep, pfn_pte(pfn, hugeprot));
 }
 
+void set_huge_swap_pte_at(struct mm_struct *mm, unsigned long addr,
+			  pte_t *ptep, pte_t pte, unsigned long sz)
+{
+	int i, ncontig;
+	size_t pgsize;
+
+	ncontig = num_contig_ptes(sz, &pgsize);
+
+	for (i = 0; i < ncontig; i++, ptep++)
+		set_pte(ptep, pte);
+}
+
+int hugetlb_walk_step(struct mm_struct *mm, struct hugetlb_pte *hpte,
+		      unsigned long addr, unsigned long sz)
+{
+	unsigned int shift;
+	unsigned long rounded_addr;
+	pmd_t *cont_pmdp;
+	pmd_t *pmdp;
+	pte_t *cont_ptep;
+	pte_t *ptep;
+
+	switch(hpte->level) {
+		case HUGETLB_LEVEL_PUD:
+			rounded_addr = addr & CONT_PMD_MASK;
+			pmdp = pmd_alloc(mm, (pud_t *)hpte->ptep, addr);
+			cont_pmdp = pmd_alloc(mm, (pud_t *)hpte->ptep,
+					rounded_addr);
+			if (!pmdp || !cont_pmdp)
+				return -ENOMEM;
+			if (sz == CONT_PMD_SIZE) {
+				if (pmd_present(*cont_pmdp) && !pmd_cont(*cont_pmdp))
+					return -EINVAL;
+				shift = CONT_PMD_SHIFT;
+				ptep = (pte_t *)cont_pmdp;
+			} else if (pmd_present(*cont_pmdp) && pmd_cont(*cont_pmdp))
+				return -EEXIST;
+			else {
+				shift = PMD_SHIFT;
+				ptep = (pte_t *)pmdp;
+			}
+			hugetlb_pte_populate(hpte, ptep, shift,
+					HUGETLB_LEVEL_PMD);
+		case HUGETLB_LEVEL_PMD:
+			ptl = pte_lockptr(mm, (pmd_t *)hpte->ptep);
+			rounded_addr = addr & CONT_PTE_MASK;
+			ptep = pte_alloc_kernel(mm, (pmd_t *)hpte->ptep, addr);
+			cont_ptep = pte_alloc_kernel(mm, (pmd_t *)hpte->ptep,
+					rounded_addr);
+			if (!ptep || !cont_ptep)
+				return -ENOMEM;
+			if (sz == CONT_PTE_SIZE) {
+				if (pte_present(*cont_ptep) && !pte_cont(*cont_ptep))
+					return -EINVAL;
+				shift = CONT_PTE_SHIFT;
+				ptep = cont_ptep;
+			} else if (pte_present(*cont_ptep) && pte_cont(*cont_ptep))
+				return -EEXIST;
+			else
+				shift = PAGE_SHIFT;
+
+			hugetlb_pte_populate(hpte, ptep, shift,
+					HUGETLB_LEVEL_PTE);
+			hpte->ptl = ptl;
+			break;
+		default:
+			BUG();
+	}
+	return 0;
+}
+
 pte_t *huge_pte_alloc(struct mm_struct *mm, struct vm_area_struct *vma,
 		      unsigned long addr, unsigned long sz)
 {
