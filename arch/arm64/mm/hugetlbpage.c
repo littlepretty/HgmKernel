@@ -101,22 +101,24 @@ int pud_huge(pud_t pud)
 }
 
 static int find_num_contig(struct mm_struct *mm, unsigned long addr,
-			   pte_t *ptep, size_t *pgsize)
+			   const struct hugetlb_pte *hpte, size_t *pgsize)
 {
-	pgd_t *pgdp = pgd_offset(mm, addr);
-	p4d_t *p4dp;
-	pud_t *pudp;
-	pmd_t *pmdp;
-
-	*pgsize = PAGE_SIZE;
-	p4dp = p4d_offset(pgdp, addr);
-	pudp = pud_offset(p4dp, addr);
-	pmdp = pmd_offset(pudp, addr);
-	if ((pte_t *)pmdp == ptep) {
-		*pgsize = PMD_SIZE;
-		return CONT_PMDS;
+	switch (hpte->level) {
+		case HUGETLB_LEVEL_PMD:
+			*pgsize = PMD_SIZE;
+			BUG_ON(hugetlb_pte_size(hpte) != CONT_PMD_SIZE);
+			return CONT_PMDS;
+		case HUGETLB_LEVEL_PTE:
+			*pgsize = PAGE_SIZE;
+			BUG_ON(hugetlb_pte_size(hpte) != CONT_PTE_SIZE);
+			return CONT_PTES;
+		default:
+			pr_err("find_num_contig got invalid hpte level :%d\n",
+					hpte->level);
+			BUG();
 	}
-	return CONT_PTES;
+
+	return 0;
 }
 
 static inline int num_contig_ptes(unsigned long size, size_t *pgsize)
@@ -143,21 +145,25 @@ static inline int num_contig_ptes(unsigned long size, size_t *pgsize)
 		*pgsize = PAGE_SIZE;
 		contig_ptes = CONT_PTES;
 		break;
+	case PAGE_SIZE:
+		contig_ptes = 1;
+		break;
 	}
 
 	return contig_ptes;
 }
 
-pte_t huge_ptep_get(pte_t *ptep)
+pte_t hugetlb_pte_get(const struct hugetlb_pte *hpte)
 {
 	int ncontig, i;
 	size_t pgsize;
+	pte_t *ptep = hpte->ptep;
 	pte_t orig_pte = ptep_get(ptep);
 
 	if (!pte_present(orig_pte) || !pte_cont(orig_pte))
 		return orig_pte;
 
-	ncontig = num_contig_ptes(page_size(pte_page(orig_pte)), &pgsize);
+	ncontig = num_contig_ptes(hugetlb_pte_size(hpte), &pgsize);
 	for (i = 0; i < ncontig; i++, ptep++) {
 		pte_t pte = ptep_get(ptep);
 
@@ -248,20 +254,21 @@ static inline struct folio *hugetlb_swap_entry_to_folio(swp_entry_t entry)
 	return page_folio(pfn_to_page(swp_offset_pfn(entry)));
 }
 
-void set_huge_pte_at(struct mm_struct *mm, unsigned long addr,
-			    pte_t *ptep, pte_t pte)
+void set_hugetlb_pte_at(struct mm_struct *mm, unsigned long addr,
+			const struct hugetlb_pte *hpte, pte_t pte)
 {
 	size_t pgsize;
 	int i;
 	int ncontig;
 	unsigned long pfn, dpfn;
 	pgprot_t hugeprot;
+	pte_t *ptep = hpte->ptep;
 
 	if (!pte_present(pte)) {
 		struct folio *folio;
 
 		folio = hugetlb_swap_entry_to_folio(pte_to_swp_entry(pte));
-		ncontig = num_contig_ptes(folio_size(folio), &pgsize);
+		ncontig = num_contig_ptes(hugetlb_pte_size(hpte), &pgsize);
 
 		for (i = 0; i < ncontig; i++, ptep++)
 			set_pte_at(mm, addr, ptep, pte);
@@ -273,7 +280,7 @@ void set_huge_pte_at(struct mm_struct *mm, unsigned long addr,
 		return;
 	}
 
-	ncontig = find_num_contig(mm, addr, ptep, &pgsize);
+	ncontig = find_num_contig(mm, addr, hpte, &pgsize);
 	pfn = pte_pfn(pte);
 	dpfn = pgsize >> PAGE_SHIFT;
 	hugeprot = pte_pgprot(pte);
@@ -282,6 +289,69 @@ void set_huge_pte_at(struct mm_struct *mm, unsigned long addr,
 
 	for (i = 0; i < ncontig; i++, ptep++, addr += pgsize, pfn += dpfn)
 		set_pte_at(mm, addr, ptep, pfn_pte(pfn, hugeprot));
+}
+
+int hugetlb_walk_step(struct mm_struct *mm, struct hugetlb_pte *hpte,
+		      unsigned long addr, unsigned long sz)
+{
+	unsigned int shift;
+	unsigned long rounded_addr;
+	pmd_t *cont_pmdp, cont_pmd;
+	pmd_t *pmdp;
+	pte_t *cont_ptep, cont_pte;
+	pte_t *ptep;
+	spinlock_t *ptl;
+
+	switch(hpte->level) {
+		case HUGETLB_LEVEL_PUD:
+			rounded_addr = addr & CONT_PMD_MASK;
+			pmdp = hugetlb_pmd_alloc(mm, hpte, addr);
+			cont_pmdp = hugetlb_pmd_alloc(mm, hpte, rounded_addr);
+			if (IS_ERR(pmdp))
+				return PTR_ERR(pmdp);
+			if (IS_ERR(cont_pmdp))
+				return PTR_ERR(cont_pmdp);
+			cont_pmd = READ_ONCE(*cont_pmdp);
+			if ((pmd_present(cont_pmd) && pmd_cont(cont_pmd))
+					|| sz == CONT_PMD_SIZE) {
+				if (pmd_present(cont_pmd) && !pmd_cont(cont_pmd))
+					return -EINVAL;
+				shift = CONT_PMD_SHIFT;
+				ptep = (pte_t *)cont_pmdp;
+			} else {
+				shift = PMD_SHIFT;
+				ptep = (pte_t *)pmdp;
+			}
+			hugetlb_pte_populate(hpte, ptep, shift,
+					HUGETLB_LEVEL_PMD);
+			break;
+		case HUGETLB_LEVEL_PMD:
+			rounded_addr = addr & CONT_PTE_MASK;
+			ptep = hugetlb_pte_alloc(mm, hpte, addr);
+			cont_ptep = hugetlb_pte_alloc(mm, hpte, rounded_addr);
+			if (IS_ERR(ptep))
+				return PTR_ERR(ptep);
+			if (IS_ERR(cont_ptep))
+				return PTR_ERR(cont_ptep);
+			cont_pte = READ_ONCE(*cont_ptep);
+			if ((pte_present(cont_pte) && pte_cont(cont_pte))
+					|| sz == CONT_PTE_SIZE) {
+				if (pte_present(cont_pte) && !pte_cont(cont_pte))
+					return -EINVAL;
+				shift = CONT_PTE_SHIFT;
+				ptep = cont_ptep;
+			} else
+				shift = PAGE_SHIFT;
+
+			ptl = pte_lockptr(mm, (pmd_t *)hpte->ptep);
+			hugetlb_pte_populate(hpte, ptep, shift,
+					HUGETLB_LEVEL_PTE);
+			hpte->ptl = ptl;
+			break;
+		default:
+			BUG();
+	}
+	return 0;
 }
 
 pte_t *huge_pte_alloc(struct mm_struct *mm, struct vm_area_struct *vma,
@@ -350,7 +420,7 @@ pte_t *huge_pte_offset(struct mm_struct *mm,
 	if (sz != PUD_SIZE && pud_none(pud))
 		return NULL;
 	/* hugepage or swap? */
-	if (pud_huge(pud) || !pud_present(pud))
+	if (sz == PUD_SIZE)
 		return (pte_t *)pudp;
 	/* table; check the next level */
 
@@ -362,7 +432,7 @@ pte_t *huge_pte_offset(struct mm_struct *mm,
 	if (!(sz == PMD_SIZE || sz == CONT_PMD_SIZE) &&
 	    pmd_none(pmd))
 		return NULL;
-	if (pmd_huge(pmd) || !pmd_present(pmd))
+	if (sz == PMD_SIZE || sz == CONT_PMD_SIZE)
 		return (pte_t *)pmdp;
 
 	if (sz == CONT_PTE_SIZE)
@@ -397,7 +467,11 @@ pte_t arch_make_huge_pte(pte_t entry, unsigned int shift, vm_flags_t flags)
 {
 	size_t pagesize = 1UL << shift;
 
+	if (pagesize == PAGE_SIZE)
+		return entry;
+
 	entry = pte_mkhuge(entry);
+
 	if (pagesize == CONT_PTE_SIZE) {
 		entry = pte_mkcont(entry);
 	} else if (pagesize == CONT_PMD_SIZE) {
@@ -409,35 +483,37 @@ pte_t arch_make_huge_pte(pte_t entry, unsigned int shift, vm_flags_t flags)
 	return entry;
 }
 
-void huge_pte_clear(struct mm_struct *mm, unsigned long addr,
-		    pte_t *ptep, unsigned long sz)
+void hugetlb_pte_clear(struct mm_struct *mm, unsigned long addr,
+		    const struct hugetlb_pte *hpte)
 {
 	int i, ncontig;
 	size_t pgsize;
+	pte_t *ptep = hpte->ptep;
 
-	ncontig = num_contig_ptes(sz, &pgsize);
+	ncontig = num_contig_ptes(hugetlb_pte_size(hpte), &pgsize);
 
 	for (i = 0; i < ncontig; i++, addr += pgsize, ptep++)
 		pte_clear(mm, addr, ptep);
 }
 
-pte_t huge_ptep_get_and_clear(struct mm_struct *mm,
-			      unsigned long addr, pte_t *ptep)
+pte_t hugetlb_pte_get_and_clear(struct mm_struct *mm,
+				unsigned long addr,
+				const struct hugetlb_pte *hpte)
 {
 	int ncontig;
 	size_t pgsize;
-	pte_t orig_pte = ptep_get(ptep);
+	pte_t orig_pte = ptep_get(hpte->ptep);
 
 	if (!pte_cont(orig_pte))
-		return ptep_get_and_clear(mm, addr, ptep);
+		return ptep_get_and_clear(mm, addr, hpte->ptep);
 
-	ncontig = find_num_contig(mm, addr, ptep, &pgsize);
+	ncontig = find_num_contig(mm, addr, hpte, &pgsize);
 
-	return get_clear_contig(mm, addr, ptep, pgsize, ncontig);
+	return get_clear_contig(mm, addr, hpte->ptep, pgsize, ncontig);
 }
 
 /*
- * huge_ptep_set_access_flags will update access flags (dirty, accesssed)
+ * hugetlb_pte_set_access_flags will update access flags (dirty, accesssed)
  * and write permission.
  *
  * For a contiguous huge pte range we need to check whether or not write
@@ -465,8 +541,8 @@ static int __cont_access_flags_changed(pte_t *ptep, pte_t pte, int ncontig)
 	return 0;
 }
 
-int huge_ptep_set_access_flags(struct vm_area_struct *vma,
-			       unsigned long addr, pte_t *ptep,
+int hugetlb_pte_set_access_flags(struct vm_area_struct *vma,
+			       unsigned long addr, const struct hugetlb_pte *hpte,
 			       pte_t pte, int dirty)
 {
 	int ncontig, i;
@@ -474,12 +550,12 @@ int huge_ptep_set_access_flags(struct vm_area_struct *vma,
 	unsigned long pfn = pte_pfn(pte), dpfn;
 	struct mm_struct *mm = vma->vm_mm;
 	pgprot_t hugeprot;
-	pte_t orig_pte;
+	pte_t orig_pte, *ptep = hpte->ptep;
 
 	if (!pte_cont(pte))
-		return ptep_set_access_flags(vma, addr, ptep, pte, dirty);
+		return ptep_set_access_flags(vma, addr, hpte->ptep, pte, dirty);
 
-	ncontig = find_num_contig(mm, addr, ptep, &pgsize);
+	ncontig = find_num_contig(mm, addr, hpte, &pgsize);
 	dpfn = pgsize >> PAGE_SHIFT;
 
 	if (!__cont_access_flags_changed(ptep, pte, ncontig))
@@ -501,21 +577,21 @@ int huge_ptep_set_access_flags(struct vm_area_struct *vma,
 	return 1;
 }
 
-void huge_ptep_set_wrprotect(struct mm_struct *mm,
-			     unsigned long addr, pte_t *ptep)
+void hugetlb_pte_set_wrprotect(struct mm_struct *mm,
+			     unsigned long addr, const struct hugetlb_pte *hpte)
 {
 	unsigned long pfn, dpfn;
 	pgprot_t hugeprot;
 	int ncontig, i;
 	size_t pgsize;
-	pte_t pte;
+	pte_t pte, *ptep = hpte->ptep;
 
 	if (!pte_cont(READ_ONCE(*ptep))) {
 		ptep_set_wrprotect(mm, addr, ptep);
 		return;
 	}
 
-	ncontig = find_num_contig(mm, addr, ptep, &pgsize);
+	ncontig = find_num_contig(mm, addr, hpte, &pgsize);
 	dpfn = pgsize >> PAGE_SHIFT;
 
 	pte = get_clear_contig_flush(mm, addr, ptep, pgsize, ncontig);
@@ -528,17 +604,18 @@ void huge_ptep_set_wrprotect(struct mm_struct *mm,
 		set_pte_at(mm, addr, ptep, pfn_pte(pfn, hugeprot));
 }
 
-pte_t huge_ptep_clear_flush(struct vm_area_struct *vma,
-			    unsigned long addr, pte_t *ptep)
+pte_t hugetlb_pte_clear_flush(struct vm_area_struct *vma,
+			    unsigned long addr, const struct hugetlb_pte *hpte)
 {
 	struct mm_struct *mm = vma->vm_mm;
 	size_t pgsize;
 	int ncontig;
+	pte_t *ptep = hpte->ptep;
 
 	if (!pte_cont(READ_ONCE(*ptep)))
 		return ptep_clear_flush(vma, addr, ptep);
 
-	ncontig = find_num_contig(mm, addr, ptep, &pgsize);
+	ncontig = find_num_contig(mm, addr, hpte, &pgsize);
 	return get_clear_contig_flush(mm, addr, ptep, pgsize, ncontig);
 }
 
