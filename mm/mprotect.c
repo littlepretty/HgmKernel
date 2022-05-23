@@ -564,12 +564,16 @@ static int prot_none_pte_entry(pte_t *pte, unsigned long addr,
 		0 : -EACCES;
 }
 
-static int prot_none_hugetlb_entry(pte_t *pte, unsigned long hmask,
-				   unsigned long addr, unsigned long next,
+static int prot_none_hugetlb_entry(struct hugetlb_pte *hpte,
+				   unsigned long addr,
 				   struct mm_walk *walk)
 {
-	return pfn_modify_allowed(pte_pfn(*pte), *(pgprot_t *)(walk->private)) ?
-		0 : -EACCES;
+	pte_t pte = huge_ptep_get(hpte->ptep);
+
+	if (!hugetlb_pte_present_leaf(hpte, pte))
+		return -EAGAIN;
+	return pfn_modify_allowed(pte_pfn(pte),
+			*(pgprot_t *)(walk->private)) ? 0 : -EACCES;
 }
 
 static int prot_none_test(unsigned long addr, unsigned long next,
@@ -612,8 +616,10 @@ mprotect_fixup(struct vma_iterator *vmi, struct mmu_gather *tlb,
 	    (newflags & VM_ACCESS_FLAGS) == 0) {
 		pgprot_t new_pgprot = vm_get_page_prot(newflags);
 
-		error = walk_page_range(current->mm, start, end,
-				&prot_none_walk_ops, &new_pgprot);
+		do {
+			error = walk_page_range(current->mm, start, end,
+					&prot_none_walk_ops, &new_pgprot);
+		} while (error == -EAGAIN);
 		if (error)
 			return error;
 	}
