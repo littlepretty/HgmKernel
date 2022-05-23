@@ -3,6 +3,7 @@
 #define _LINUX_PAGEWALK_H
 
 #include <linux/mm.h>
+#include <linux/hugetlb.h>
 
 struct mm_walk;
 
@@ -47,7 +48,7 @@ struct mm_walk_ops {
 			 unsigned long next, struct mm_walk *walk);
 	int (*pte_hole)(unsigned long addr, unsigned long next,
 			int depth, struct mm_walk *walk);
-	int (*hugetlb_entry)(pte_t *pte, unsigned long hmask,
+	int (*hugetlb_entry)(struct hugetlb_pte *hpte,
 			     unsigned long addr, unsigned long next,
 			     struct mm_walk *walk);
 	int (*test_walk)(unsigned long addr, unsigned long next,
