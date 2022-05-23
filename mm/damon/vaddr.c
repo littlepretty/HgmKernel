@@ -330,11 +330,11 @@ out:
 }
 
 #ifdef CONFIG_HUGETLB_PAGE
-static void damon_hugetlb_mkold(pte_t *pte, struct mm_struct *mm,
+static void damon_hugetlb_mkold(struct hugetlb_pte *hpte, pte_t entry,
+				struct mm_struct *mm,
 				struct vm_area_struct *vma, unsigned long addr)
 {
 	bool referenced = false;
-	pte_t entry = huge_ptep_get(pte);
 	struct folio *folio = pfn_folio(pte_pfn(entry));
 
 	folio_get(folio);
@@ -342,12 +342,12 @@ static void damon_hugetlb_mkold(pte_t *pte, struct mm_struct *mm,
 	if (pte_young(entry)) {
 		referenced = true;
 		entry = pte_mkold(entry);
-		set_huge_pte_at(mm, addr, pte, entry);
+		set_huge_pte_at(mm, addr, hpte->ptep, entry);
 	}
 
 #ifdef CONFIG_MMU_NOTIFIER
 	if (mmu_notifier_clear_young(mm, addr,
-				     addr + huge_page_size(hstate_vma(vma))))
+				     addr + hugetlb_pte_size(hpte)))
 		referenced = true;
 #endif /* CONFIG_MMU_NOTIFIER */
 
@@ -358,20 +358,26 @@ static void damon_hugetlb_mkold(pte_t *pte, struct mm_struct *mm,
 	folio_put(folio);
 }
 
-static int damon_mkold_hugetlb_entry(pte_t *pte, unsigned long hmask,
-				     unsigned long addr, unsigned long end,
+static int damon_mkold_hugetlb_entry(struct hugetlb_pte *hpte,
+				     unsigned long addr,
 				     struct mm_walk *walk)
 {
-	struct hstate *h = hstate_vma(walk->vma);
 	spinlock_t *ptl;
 	pte_t entry;
 
-	ptl = huge_pte_lock(h, walk->mm, pte);
-	entry = huge_ptep_get(pte);
+	ptl = hugetlb_pte_lock(hpte);
+	entry = huge_ptep_get(hpte->ptep);
 	if (!pte_present(entry))
 		goto out;
 
-	damon_hugetlb_mkold(pte, walk->mm, walk->vma, addr);
+	if (!hugetlb_pte_present_leaf(hpte, entry))
+		/*
+		 * We raced with someone splitting a blank PTE. Treat this PTE
+		 * as if it were blank.
+		 */
+		goto out;
+
+	damon_hugetlb_mkold(hpte, entry, walk->mm, walk->vma, addr);
 
 out:
 	spin_unlock(ptl);
@@ -483,8 +489,8 @@ out:
 }
 
 #ifdef CONFIG_HUGETLB_PAGE
-static int damon_young_hugetlb_entry(pte_t *pte, unsigned long hmask,
-				     unsigned long addr, unsigned long end,
+static int damon_young_hugetlb_entry(struct hugetlb_pte *hpte,
+				     unsigned long addr,
 				     struct mm_walk *walk)
 {
 	struct damon_young_walk_private *priv = walk->private;
@@ -493,9 +499,16 @@ static int damon_young_hugetlb_entry(pte_t *pte, unsigned long hmask,
 	spinlock_t *ptl;
 	pte_t entry;
 
-	ptl = huge_pte_lock(h, walk->mm, pte);
-	entry = huge_ptep_get(pte);
+	ptl = hugetlb_pte_lock(hpte);
+	entry = huge_ptep_get(hpte->ptep);
 	if (!pte_present(entry))
+		goto out;
+
+	if (!hugetlb_pte_present_leaf(hpte, entry))
+		/*
+		 * We raced with someone splitting a blank PTE. Treat this PTE
+		 * as if it were blank.
+		 */
 		goto out;
 
 	folio = pfn_folio(pte_pfn(entry));
