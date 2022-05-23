@@ -728,18 +728,28 @@ static void show_smap_vma_flags(struct seq_file *m, struct vm_area_struct *vma)
 }
 
 #ifdef CONFIG_HUGETLB_PAGE
-static int smaps_hugetlb_range(pte_t *pte, unsigned long hmask,
-				 unsigned long addr, unsigned long end,
-				 struct mm_walk *walk)
+static int smaps_hugetlb_range(struct hugetlb_pte *hpte,
+				unsigned long addr,
+				struct mm_walk *walk)
 {
 	struct mem_size_stats *mss = walk->private;
 	struct vm_area_struct *vma = walk->vma;
 	struct page *page = NULL;
+	pte_t pte = huge_ptep_get(hpte->ptep);
 
-	if (pte_present(*pte)) {
-		page = vm_normal_page(vma, addr, *pte);
-	} else if (is_swap_pte(*pte)) {
-		swp_entry_t swpent = pte_to_swp_entry(*pte);
+	if (pte_present(pte)) {
+		/* We only care about leaf-level PTEs. */
+		if (!hugetlb_pte_present_leaf(hpte, pte))
+			/*
+			 * The only case where hpte is not a leaf is that
+			 * it was originally none, but it was split from
+			 * under us. It was originally none, so exclude it.
+			 */
+			return 0;
+
+		page = vm_normal_page(vma, addr, pte);
+	} else if (is_swap_pte(pte)) {
+		swp_entry_t swpent = pte_to_swp_entry(pte);
 
 		if (is_pfn_swap_entry(swpent))
 			page = pfn_swap_entry_to_page(swpent);
@@ -748,9 +758,9 @@ static int smaps_hugetlb_range(pte_t *pte, unsigned long hmask,
 		int mapcount = page_mapcount(page);
 
 		if (mapcount >= 2)
-			mss->shared_hugetlb += huge_page_size(hstate_vma(vma));
+			mss->shared_hugetlb += hugetlb_pte_size(hpte);
 		else
-			mss->private_hugetlb += huge_page_size(hstate_vma(vma));
+			mss->private_hugetlb += hugetlb_pte_size(hpte);
 	}
 	return 0;
 }
@@ -1569,22 +1579,31 @@ static int pagemap_pmd_range(pmd_t *pmdp, unsigned long addr, unsigned long end,
 
 #ifdef CONFIG_HUGETLB_PAGE
 /* This function walks within one hugetlb entry in the single call */
-static int pagemap_hugetlb_range(pte_t *ptep, unsigned long hmask,
-				 unsigned long addr, unsigned long end,
+static int pagemap_hugetlb_range(struct hugetlb_pte *hpte,
+				 unsigned long addr,
 				 struct mm_walk *walk)
 {
 	struct pagemapread *pm = walk->private;
 	struct vm_area_struct *vma = walk->vma;
 	u64 flags = 0, frame = 0;
 	int err = 0;
-	pte_t pte;
+	unsigned long hmask = hugetlb_pte_mask(hpte);
+	unsigned long end = addr + hugetlb_pte_size(hpte);
+	pte_t pte = huge_ptep_get(hpte->ptep);
+	struct page *page;
 
 	if (vma->vm_flags & VM_SOFTDIRTY)
 		flags |= PM_SOFT_DIRTY;
 
-	pte = huge_ptep_get(ptep);
 	if (pte_present(pte)) {
-		struct page *page = pte_page(pte);
+		/*
+		 * We raced with this PTE being split, which can only happen if
+		 * it was blank before. Treat it is as if it were blank.
+		 */
+		if (!hugetlb_pte_present_leaf(hpte, pte))
+			return 0;
+
+		page = pte_page(pte);
 
 		if (!PageAnon(page))
 			flags |= PM_FILE;
@@ -1865,10 +1884,16 @@ static struct page *can_gather_numa_stats_pmd(pmd_t pmd,
 }
 #endif
 
+struct show_numa_map_private {
+	struct numa_maps *md;
+	struct page *last_page;
+};
+
 static int gather_pte_stats(pmd_t *pmd, unsigned long addr,
 		unsigned long end, struct mm_walk *walk)
 {
-	struct numa_maps *md = walk->private;
+	struct show_numa_map_private *priv = walk->private;
+	struct numa_maps *md = priv->md;
 	struct vm_area_struct *vma = walk->vma;
 	spinlock_t *ptl;
 	pte_t *orig_pte;
@@ -1880,6 +1905,7 @@ static int gather_pte_stats(pmd_t *pmd, unsigned long addr,
 		struct page *page;
 
 		page = can_gather_numa_stats_pmd(*pmd, vma, addr);
+		priv->last_page = page;
 		if (page)
 			gather_stats(page, md, pmd_dirty(*pmd),
 				     HPAGE_PMD_SIZE/PAGE_SIZE);
@@ -1893,6 +1919,7 @@ static int gather_pte_stats(pmd_t *pmd, unsigned long addr,
 	orig_pte = pte = pte_offset_map_lock(walk->mm, pmd, addr, &ptl);
 	do {
 		struct page *page = can_gather_numa_stats(*pte, vma, addr);
+		priv->last_page = page;
 		if (!page)
 			continue;
 		gather_stats(page, md, pte_dirty(*pte), 1);
@@ -1903,19 +1930,25 @@ static int gather_pte_stats(pmd_t *pmd, unsigned long addr,
 	return 0;
 }
 #ifdef CONFIG_HUGETLB_PAGE
-static int gather_hugetlb_stats(pte_t *pte, unsigned long hmask,
-		unsigned long addr, unsigned long end, struct mm_walk *walk)
+static int gather_hugetlb_stats(struct hugetlb_pte *hpte, unsigned long addr,
+		struct mm_walk *walk)
 {
-	pte_t huge_pte = huge_ptep_get(pte);
+	struct show_numa_map_private *priv = walk->private;
+	pte_t huge_pte = huge_ptep_get(hpte->ptep);
 	struct numa_maps *md;
 	struct page *page;
 
-	if (!pte_present(huge_pte))
+	if (!hugetlb_pte_present_leaf(hpte, huge_pte))
 		return 0;
 
-	page = pte_page(huge_pte);
+	page = compound_head(pte_page(huge_pte));
+	if (priv->last_page == page)
+		/* we've already accounted for this page */
+		return 0;
 
-	md = walk->private;
+	priv->last_page = page;
+
+	md = priv->md;
 	gather_stats(page, md, pte_dirty(huge_pte), 1);
 	return 0;
 }
@@ -1945,8 +1978,14 @@ static int show_numa_map(struct seq_file *m, void *v)
 	struct file *file = vma->vm_file;
 	struct mm_struct *mm = vma->vm_mm;
 	struct mempolicy *pol;
+
 	char buffer[64];
 	int nid;
+
+	struct show_numa_map_private numa_map_private;
+
+	numa_map_private.md = md;
+	numa_map_private.last_page = NULL;
 
 	if (!mm)
 		return 0;
@@ -1977,7 +2016,7 @@ static int show_numa_map(struct seq_file *m, void *v)
 		seq_puts(m, " huge");
 
 	/* mmap_lock is held by m_start */
-	walk_page_vma(vma, &show_numa_ops, md);
+	walk_page_vma(vma, &show_numa_ops, &numa_map_private);
 
 	if (!md->pages)
 		goto out;

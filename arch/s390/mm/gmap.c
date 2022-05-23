@@ -2621,13 +2621,25 @@ static int __s390_enable_skey_pmd(pmd_t *pmd, unsigned long addr,
 	return 0;
 }
 
-static int __s390_enable_skey_hugetlb(pte_t *pte, unsigned long addr,
-				      unsigned long hmask, unsigned long next,
+static int __s390_enable_skey_hugetlb(struct hugetlb_pte *hpte,
+				      unsigned long addr,
 				      struct mm_walk *walk)
 {
-	pmd_t *pmd = (pmd_t *)pte;
+	struct hstate *h = hstate_vma(walk->vma);
+	pmd_t *pmd;
 	unsigned long start, end;
-	struct page *page = pmd_page(*pmd);
+	struct page *page;
+
+	if (huge_page_size(h) != hugetlb_pte_size(hpte))
+		/* Ignore high-granularity PTEs. */
+		return 0;
+
+	if (!pte_present(huge_ptep_get(hpte->ptep)))
+		/* Ignore non-present PTEs. */
+		return 0;
+
+	pmd = (pmd_t *)pte;
+	page = pmd_page(*pmd);
 
 	/*
 	 * The write check makes sure we do not set a key on shared
