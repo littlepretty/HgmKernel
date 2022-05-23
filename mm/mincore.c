@@ -22,18 +22,29 @@
 #include <linux/uaccess.h>
 #include "swap.h"
 
-static int mincore_hugetlb(pte_t *pte, unsigned long hmask, unsigned long addr,
-			unsigned long end, struct mm_walk *walk)
+static int mincore_hugetlb(struct hugetlb_pte *hpte, unsigned long addr,
+			   struct mm_walk *walk)
 {
 #ifdef CONFIG_HUGETLB_PAGE
 	unsigned char present;
+	unsigned long end = addr + hugetlb_pte_size(hpte);
 	unsigned char *vec = walk->private;
+	pte_t pte = huge_ptep_get(hpte->ptep);
 
 	/*
 	 * Hugepages under user process are always in RAM and never
 	 * swapped out, but theoretically it needs to be checked.
 	 */
-	present = pte && !huge_pte_none(huge_ptep_get(pte));
+	present = !huge_pte_none(pte);
+
+	/*
+	 * If the pte is present but not a leaf, we raced with someone
+	 * splitting it. For someone to have split it, it must have been
+	 * huge_pte_none before, so treat it as such.
+	 */
+	if (pte_present(pte) && !hugetlb_pte_present_leaf(hpte, pte))
+		present = false;
+
 	for (; addr != end; vec++, addr += PAGE_SIZE)
 		*vec = present;
 	walk->private = vec;
