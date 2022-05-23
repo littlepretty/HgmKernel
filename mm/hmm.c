@@ -469,27 +469,34 @@ out_unlock:
 #endif
 
 #ifdef CONFIG_HUGETLB_PAGE
-static int hmm_vma_walk_hugetlb_entry(pte_t *pte, unsigned long hmask,
-				      unsigned long start, unsigned long end,
+static int hmm_vma_walk_hugetlb_entry(struct hugetlb_pte *hpte,
+				      unsigned long start,
 				      struct mm_walk *walk)
 {
 	unsigned long addr = start, i, pfn;
 	struct hmm_vma_walk *hmm_vma_walk = walk->private;
 	struct hmm_range *range = hmm_vma_walk->range;
-	struct vm_area_struct *vma = walk->vma;
 	unsigned int required_fault;
 	unsigned long pfn_req_flags;
 	unsigned long cpu_flags;
+	unsigned long hmask = hugetlb_pte_mask(hpte);
+	unsigned int order = hugetlb_pte_shift(hpte) - PAGE_SHIFT;
+	unsigned long end = start + hugetlb_pte_size(hpte);
 	spinlock_t *ptl;
 	pte_t entry;
 
-	ptl = huge_pte_lock(hstate_vma(vma), walk->mm, pte);
-	entry = huge_ptep_get(pte);
+	ptl = hugetlb_pte_lock(walk->mm, hpte);
+	entry = huge_ptep_get(hpte->ptep);
+
+	if (!hugetlb_pte_present_leaf(hpte, entry)) {
+		spin_unlock(ptl);
+		return -EAGAIN;
+	}
 
 	i = (start - range->start) >> PAGE_SHIFT;
 	pfn_req_flags = range->hmm_pfns[i];
 	cpu_flags = pte_to_hmm_pfn_flags(range, entry) |
-		    hmm_pfn_flags_order(huge_page_order(hstate_vma(vma)));
+		    hmm_pfn_flags_order(order);
 	required_fault =
 		hmm_pte_need_fault(hmm_vma_walk, pfn_req_flags, cpu_flags);
 	if (required_fault) {
@@ -593,7 +600,7 @@ int hmm_range_fault(struct hmm_range *range)
 		 * in pfns. All entries < last in the pfn array are set to their
 		 * output, and all >= are still at their input values.
 		 */
-	} while (ret == -EBUSY);
+	} while (ret == -EBUSY || ret == -EAGAIN);
 	return ret;
 }
 EXPORT_SYMBOL(hmm_range_fault);
