@@ -2620,10 +2620,15 @@ static int __s390_enable_skey_pmd(pmd_t *pmd, unsigned long addr,
 	return 0;
 }
 
-static int __s390_enable_skey_hugetlb(pte_t *pte, unsigned long addr,
-				      unsigned long hmask, unsigned long next,
+static int __s390_enable_skey_hugetlb(struct hugetlb_pte *hpte,
+				      unsigned long addr,
+				      bool high_granularity,
 				      struct mm_walk *walk)
 {
+	/* We only care about the hstate-level PTEs. */
+	if (high_granularity)
+		return 0;
+
 	pmd_t *pmd = (pmd_t *)pte;
 	unsigned long start, end;
 	struct page *page = pmd_page(*pmd);
