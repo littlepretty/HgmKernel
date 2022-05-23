@@ -2629,13 +2629,19 @@ static int __s390_enable_skey_pmd(pmd_t *pmd, unsigned long addr,
 	return 0;
 }
 
-static int __s390_enable_skey_hugetlb(pte_t *pte, unsigned long addr,
-				      unsigned long hmask, unsigned long next,
+static int __s390_enable_skey_hugetlb(struct hugetlb_pte *hpte,
+				      unsigned long addr,
 				      struct mm_walk *walk)
 {
-	pmd_t *pmd = (pmd_t *)pte;
+	pmd_t *pmd = (pmd_t *)hpte->ptep;
 	unsigned long start, end;
 	struct page *page = pmd_page(*pmd);
+
+	/*
+	 * We don't support high-granularity mappings yet. If we did, the
+	 * pmd_page() call above would be unsafe.
+	 */
+	BUILD_BUG_ON(IS_ENABLED(CONFIG_HUGETLB_HIGH_GRANULARITY_MAPPING));
 
 	/*
 	 * The write check makes sure we do not set a key on shared
