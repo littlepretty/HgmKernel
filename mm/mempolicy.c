@@ -558,8 +558,8 @@ static int queue_folios_pte_range(pmd_t *pmd, unsigned long addr,
 	return addr != end ? -EIO : 0;
 }
 
-static int queue_folios_hugetlb(pte_t *pte, unsigned long hmask,
-			       unsigned long addr, unsigned long end,
+static int queue_folios_hugetlb(struct hugetlb_pte *hpte,
+			       unsigned long addr,
 			       struct mm_walk *walk)
 {
 	int ret = 0;
@@ -570,8 +570,12 @@ static int queue_folios_hugetlb(pte_t *pte, unsigned long hmask,
 	spinlock_t *ptl;
 	pte_t entry;
 
-	ptl = huge_pte_lock(hstate_vma(walk->vma), walk->mm, pte);
-	entry = huge_ptep_get(pte);
+	/* We don't migrate high-granularity HugeTLB mappings for now. */
+	if (hugetlb_hgm_enabled(walk->vma))
+		return -EINVAL;
+
+	ptl = hugetlb_pte_lock(hpte);
+	entry = huge_ptep_get(hpte->ptep);
 	if (!pte_present(entry))
 		goto unlock;
 	folio = pfn_folio(pte_pfn(entry));
@@ -608,7 +612,7 @@ static int queue_folios_hugetlb(pte_t *pte, unsigned long hmask,
 	 */
 	if (flags & (MPOL_MF_MOVE_ALL) ||
 	    (flags & MPOL_MF_MOVE && folio_estimated_sharers(folio) == 1 &&
-	     !hugetlb_pmd_shared(pte))) {
+	     !hugetlb_pmd_shared(hpte->ptep))) {
 		if (!isolate_hugetlb(folio, qp->pagelist) &&
 			(flags & MPOL_MF_STRICT))
 			/*
