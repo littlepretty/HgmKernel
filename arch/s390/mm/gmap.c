@@ -2620,10 +2620,14 @@ static int __s390_enable_skey_pmd(pmd_t *pmd, unsigned long addr,
 	return 0;
 }
 
-static int __s390_enable_skey_hugetlb(pte_t *pte, unsigned long addr,
-				      unsigned long hmask, unsigned long next,
+static int __s390_enable_skey_hugetlb(struct hugetlb_pte *hpte,
+				      unsigned long addr, unsigned long next,
 				      struct mm_walk *walk)
 {
+	if (!hugetlb_pte_present_leaf(hpte) ||
+			hugetlb_pte_size(hpte) != PMD_SIZE)
+		return -EINVAL;
+
 	pmd_t *pmd = (pmd_t *)pte;
 	unsigned long start, end;
 	struct page *page = pmd_page(*pmd);
