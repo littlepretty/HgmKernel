@@ -676,6 +676,7 @@ static int check_hwpoisoned_entry(pte_t pte, unsigned long addr, short shift,
 				unsigned long poisoned_pfn, struct to_kill *tk)
 {
 	unsigned long pfn = 0;
+	unsigned long base_pages_poisoned = (1UL << shift) / PAGE_SIZE;
 
 	if (pte_present(pte)) {
 		pfn = pte_pfn(pte);
@@ -686,7 +687,8 @@ static int check_hwpoisoned_entry(pte_t pte, unsigned long addr, short shift,
 			pfn = swp_offset_pfn(swp);
 	}
 
-	if (!pfn || pfn != poisoned_pfn)
+	if (!pfn || pfn < poisoned_pfn ||
+			pfn >= poisoned_pfn + base_pages_poisoned)
 		return 0;
 
 	set_to_kill(tk, addr, shift);
@@ -752,16 +754,15 @@ out:
 }
 
 #ifdef CONFIG_HUGETLB_PAGE
-static int hwpoison_hugetlb_range(pte_t *ptep, unsigned long hmask,
-			    unsigned long addr, unsigned long end,
-			    struct mm_walk *walk)
+static int hwpoison_hugetlb_range(struct hugetlb_pte *hpte,
+				  unsigned long addr,
+				  struct mm_walk *walk)
 {
 	struct hwp_walk *hwp = walk->private;
-	pte_t pte = huge_ptep_get(ptep);
-	struct hstate *h = hstate_vma(walk->vma);
+	pte_t pte = huge_ptep_get(hpte->ptep);
 
-	return check_hwpoisoned_entry(pte, addr, huge_page_shift(h),
-				      hwp->pfn, &hwp->tk);
+	return check_hwpoisoned_entry(pte, addr & hugetlb_pte_mask(hpte),
+			hpte->shift, hwp->pfn, &hwp->tk);
 }
 #else
 #define hwpoison_hugetlb_range	NULL
