@@ -3,6 +3,7 @@
 #define _LINUX_PAGEWALK_H
 
 #include <linux/mm.h>
+#include <linux/hugetlb.h>
 
 struct mm_walk;
 
@@ -31,6 +32,10 @@ struct mm_walk;
  *			ptl after dropping the vma lock, or else revalidate
  *			those items after re-acquiring the vma lock and before
  *			accessing them.
+ *			In the presence of high-granularity hugetlb entries,
+ *			@hugetlb_entry is called only for leaf-level entries
+ *			(hstate-level entries are ignored if they are not
+ *			leaves).
  * @test_walk:		caller specific callback function to determine whether
  *			we walk over the current vma or not. Returning 0 means
  *			"do page table walk over the current vma", returning
@@ -58,9 +63,8 @@ struct mm_walk_ops {
 			 unsigned long next, struct mm_walk *walk);
 	int (*pte_hole)(unsigned long addr, unsigned long next,
 			int depth, struct mm_walk *walk);
-	int (*hugetlb_entry)(pte_t *pte, unsigned long hmask,
-			     unsigned long addr, unsigned long next,
-			     struct mm_walk *walk);
+	int (*hugetlb_entry)(struct hugetlb_pte *hpte,
+			     unsigned long addr, struct mm_walk *walk);
 	int (*test_walk)(unsigned long addr, unsigned long next,
 			struct mm_walk *walk);
 	int (*pre_vma)(unsigned long start, unsigned long end,
