@@ -3,6 +3,7 @@
 #include <linux/highmem.h>
 #include <linux/sched.h>
 #include <linux/hugetlb.h>
+#include <linux/minmax.h>
 
 /*
  * We want to know the real level where a entry is located ignoring any
@@ -301,19 +302,51 @@ static int walk_hugetlb_range(unsigned long addr, unsigned long end,
 	pte_t *pte;
 	const struct mm_walk_ops *ops = walk->ops;
 	int err = 0;
+	struct hugetlb_pte hpte;
+	bool has_i_mmap_lock = false;
+	struct address_space *mapping = vma->vm_file->f_mapping;
 
 	do {
-		next = hugetlb_entry_end(h, addr, end);
 		pte = huge_pte_offset(walk->mm, addr & hmask, sz);
-
-		if (pte)
-			err = ops->hugetlb_entry(pte, hmask, addr, next, walk);
-		else if (ops->pte_hole)
-			err = ops->pte_hole(addr, next, -1, walk);
+		if (!pte) {
+			next = hugetlb_entry_end(h, addr, end);
+			if (ops->pte_hole)
+				err = ops->pte_hole(addr, next, -1, walk);
+		} else {
+			hugetlb_pte_populate(&hpte, pte, huge_page_shift(h),
+					hpage_size_to_level(sz));
+			err = ops->hugetlb_entry(&hpte, addr,
+					/*high_granularity=*/false, walk);
+			if (err)
+				break;
+			if (hugetlb_hgm_enabled(vma)) {
+				/*
+				 * We need to grab the mapping lock for reading
+				 * to prevent the page table from being
+				 * collapsed from under us.
+				 */
+				if (!has_i_mmap_lock) {
+					has_i_mmap_lock = true;
+					i_mmap_lock_read(mapping);
+				}
+				hugetlb_walk_to(walk->mm, &hpte, addr,
+						PAGE_SIZE,
+						/*stop_at_none=*/true);
+				if (hpte.shift != huge_page_shift(h))
+					err = ops->hugetlb_entry(
+							&hpte, addr,
+							/*high_granularity=*/true,
+							walk);
+			}
+			next = min(addr + hugetlb_pte_size(&hpte), end);
+		}
 
 		if (err)
 			break;
 	} while (addr = next, addr != end);
+
+	if (has_i_mmap_lock)
+		i_mmap_unlock_read(mapping);
 
 	return err;
 }

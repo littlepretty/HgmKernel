@@ -3,6 +3,7 @@
 #define _LINUX_PAGEWALK_H
 
 #include <linux/mm.h>
+#include <linux/hugetlb.h>
 
 struct mm_walk;
 
@@ -21,7 +22,11 @@ struct mm_walk;
  *			depth is -1 if not known, 0:PGD, 1:P4D, 2:PUD, 3:PMD
  *			4:PTE. Any folded depths (where PTRS_PER_P?D is equal
  *			to 1) are skipped.
- * @hugetlb_entry:	if set, called for each hugetlb entry
+ * @hugetlb_entry:	if set, called for (1) each hstate-level hugetlb entry,
+ * 			and if the hstate-level is not a leaf, (2) all
+ * 			leaf-level page table entries.
+ * 			For case (1), @high_granularity = false, and for case
+ * 			(2), @high_granularity = true.
  * @test_walk:		caller specific callback function to determine whether
  *			we walk over the current vma or not. Returning 0 means
  *			"do page table walk over the current vma", returning
@@ -47,8 +52,8 @@ struct mm_walk_ops {
 			 unsigned long next, struct mm_walk *walk);
 	int (*pte_hole)(unsigned long addr, unsigned long next,
 			int depth, struct mm_walk *walk);
-	int (*hugetlb_entry)(pte_t *pte, unsigned long hmask,
-			     unsigned long addr, unsigned long next,
+	int (*hugetlb_entry)(struct hugetlb_pte *hpte,
+			     unsigned long addr, bool high_granularity,
 			     struct mm_walk *walk);
 	int (*test_walk)(unsigned long addr, unsigned long next,
 			struct mm_walk *walk);
