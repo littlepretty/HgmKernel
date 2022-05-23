@@ -3,6 +3,7 @@
 #include <linux/highmem.h>
 #include <linux/sched.h>
 #include <linux/hugetlb.h>
+#include <linux/minmax.h>
 
 /*
  * We want to know the real level where a entry is located ignoring any
@@ -301,13 +302,26 @@ static int walk_hugetlb_range(unsigned long addr, unsigned long end,
 	pte_t *pte;
 	const struct mm_walk_ops *ops = walk->ops;
 	int err = 0;
+	struct hugetlb_pte hpte;
 
 	do {
-		next = hugetlb_entry_end(h, addr, end);
 		pte = huge_pte_offset(walk->mm, addr & hmask, sz);
+		if (!pte) {
+			next = hugetlb_entry_end(h, addr, end);
+		} else {
+			hugetlb_pte_populate(&hpte, pte, huge_page_shift(h));
+			if (hugetlb_hgm_enabled(vma)) {
+				err = hugetlb_walk_to(walk->mm, &hpte, addr,
+						      PAGE_SIZE,
+						      /*stop_at_none=*/true);
+				if (err)
+					break;
+			}
+			next = min(addr + hugetlb_pte_size(&hpte), end);
+		}
 
 		if (pte)
-			err = ops->hugetlb_entry(pte, hmask, addr, next, walk);
+			err = ops->hugetlb_entry(&hpte, addr, next, walk);
 		else if (ops->pte_hole)
 			err = ops->pte_hole(addr, next, -1, walk);
 
