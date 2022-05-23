@@ -559,7 +559,7 @@ static int queue_pages_pte_range(pmd_t *pmd, unsigned long addr,
 	return addr != end ? -EIO : 0;
 }
 
-static int queue_pages_hugetlb(pte_t *pte, unsigned long hmask,
+static int queue_pages_hugetlb(struct hugetlb_pte *hpte,
 			       unsigned long addr, unsigned long end,
 			       struct mm_walk *walk)
 {
@@ -571,8 +571,13 @@ static int queue_pages_hugetlb(pte_t *pte, unsigned long hmask,
 	spinlock_t *ptl;
 	pte_t entry;
 
-	ptl = huge_pte_lock(hstate_vma(walk->vma), walk->mm, pte);
-	entry = huge_ptep_get(pte);
+	/* We don't migrate high-granularity HugeTLB mappings for now. */
+	if (hugetlb_pte_size(hpte) !=
+			huge_page_size(hstate_vma(walk->vma)))
+		return -EINVAL;
+
+	ptl = hugetlb_pte_lock(walk->mm, hpte);
+	entry = hugetlb_ptep_get(hpte);
 	if (!pte_present(entry))
 		goto unlock;
 	page = pte_page(entry);
