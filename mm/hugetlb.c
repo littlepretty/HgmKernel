@@ -34,6 +34,7 @@
 #include <linux/nospec.h>
 #include <linux/delayacct.h>
 #include <linux/memory.h>
+#include <linux/sort.h>
 
 #include <asm/page.h>
 #include <asm/pgalloc.h>
@@ -49,6 +50,10 @@
 
 int hugetlb_max_hstate __read_mostly;
 unsigned int default_hstate_idx;
+/*
+ * After hugetlb_init_hstates is called, hstates will be sorted from largest
+ * to smallest.
+ */
 struct hstate hstates[HUGE_MAX_HSTATE];
 
 #ifdef CONFIG_CMA
@@ -3461,7 +3466,7 @@ found:
 	/* Put them into a private list first because mem_map is not up yet */
 	INIT_LIST_HEAD(&m->list);
 	list_add(&m->list, &huge_boot_pages);
-	m->hstate = h;
+	m->hstate_sz = huge_page_size(h);
 	return 1;
 }
 
@@ -3476,7 +3481,7 @@ static void __init gather_bootmem_prealloc(void)
 	list_for_each_entry(m, &huge_boot_pages, list) {
 		struct page *page = virt_to_page(m);
 		struct folio *folio = page_folio(page);
-		struct hstate *h = m->hstate;
+		struct hstate *h = size_to_hstate(m->hstate_sz);
 
 		VM_BUG_ON(!hstate_is_gigantic(h));
 		WARN_ON(folio_ref_count(folio) != 1);
@@ -3592,9 +3597,38 @@ static void __init hugetlb_hstate_alloc_pages(struct hstate *h)
 	kfree(node_alloc_noretry);
 }
 
+static int compare_hstates_decreasing(const void *a, const void *b)
+{
+	unsigned long sz_a = huge_page_size((const struct hstate *)a);
+	unsigned long sz_b = huge_page_size((const struct hstate *)b);
+
+	if (sz_a < sz_b)
+		return 1;
+	if (sz_a > sz_b)
+		return -1;
+	return 0;
+}
+
+static void sort_hstates(void)
+{
+	unsigned long default_hstate_sz = huge_page_size(&default_hstate);
+
+	/* Sort from largest to smallest. */
+	sort(hstates, hugetlb_max_hstate, sizeof(*hstates),
+	     compare_hstates_decreasing, NULL);
+
+	/*
+	 * We may have changed the location of the default hstate, so we need to
+	 * update it.
+	 */
+	default_hstate_idx = hstate_index(size_to_hstate(default_hstate_sz));
+}
+
 static void __init hugetlb_init_hstates(void)
 {
-	struct hstate *h, *h2;
+	struct hstate *h;
+
+	sort_hstates();
 
 	for_each_hstate(h) {
 		/* oversize hugepages were init'ed in early boot */
@@ -3613,13 +3647,8 @@ static void __init hugetlb_init_hstates(void)
 			continue;
 		if (hugetlb_cma_size && h->order <= HUGETLB_PAGE_ORDER)
 			continue;
-		for_each_hstate(h2) {
-			if (h2 == h)
-				continue;
-			if (h2->order < h->order &&
-			    h2->order > h->demote_order)
-				h->demote_order = h2->order;
-		}
+		if (h - 1 >= &hstates[0])
+			h->demote_order = huge_page_order(h - 1);
 	}
 }
 
