@@ -7928,6 +7928,24 @@ bool hugetlb_hgm_enabled(struct vm_area_struct *vma)
 {
 	return vma && (vma->vm_flags & VM_HUGETLB_HGM);
 }
+/* Should only be used by the for_each_hgm_shift macro. */
+static unsigned int __shift_for_hstate(struct hstate *h)
+{
+	/* If h is out of bounds, we have reached the end, so give PAGE_SIZE */
+	if (h >= &hstates[hugetlb_max_hstate])
+		return PAGE_SHIFT;
+	return huge_page_shift(h);
+}
+
+/*
+ * Intentionally go out of bounds. An out-of-bounds hstate will be converted to
+ * PAGE_SIZE.
+ */
+#define for_each_hgm_shift(hstate, tmp_h, shift) \
+	for ((tmp_h) = hstate; (shift) = __shift_for_hstate(tmp_h), \
+			       (tmp_h) <= &hstates[hugetlb_max_hstate]; \
+			       (tmp_h)++)
+
 #endif /* CONFIG_HUGETLB_HIGH_GRANULARITY_MAPPING */
 
 /*
