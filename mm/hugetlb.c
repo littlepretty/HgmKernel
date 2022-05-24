@@ -7032,6 +7032,18 @@ int hugetlb_walk_to(struct mm_struct *mm, struct hugetlb_pte *hpte,
 
 #endif /* CONFIG_ARCH_WANT_GENERAL_HUGETLB */
 
+#ifdef CONFIG_HUGETLB_HIGH_GRANULARITY_MAPPING
+static unsigned int get_shift_for_hstate(struct hstate *h) {
+	if (h >= &hstates[hugetlb_max_hstate])
+		return PAGE_SHIFT;
+	return huge_page_shift(h);
+}
+#define for_each_hgm_shift(hstate, tmp_h, shift) \
+	for ((tmp_h) = hstate; (shift) = get_shift_for_hstate(tmp_h), \
+			       (tmp_h) <= &hstates[hugetlb_max_hstate]; \
+			       (tmp_h)++)
+#endif /* CONFIG_HUGETLB_HIGH_GRANULARITY_MAPPING */
+
 /*
  * These functions are overwritable if your architecture needs its own
  * behavior.
