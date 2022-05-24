@@ -734,17 +734,17 @@ static inline unsigned long huge_page_mask(struct hstate *h)
 	return h->mask;
 }
 
-static inline unsigned int huge_page_order(struct hstate *h)
+static inline unsigned int huge_page_order(const struct hstate *h)
 {
 	return h->order;
 }
 
-static inline unsigned huge_page_shift(struct hstate *h)
+static inline unsigned huge_page_shift(const struct hstate *h)
 {
 	return h->order + PAGE_SHIFT;
 }
 
-static inline bool hstate_is_gigantic(struct hstate *h)
+static inline bool hstate_is_gigantic(const struct hstate *h)
 {
 	return huge_page_order(h) >= MAX_ORDER;
 }
@@ -754,7 +754,7 @@ static inline unsigned int pages_per_huge_page(const struct hstate *h)
 	return 1 << h->order;
 }
 
-static inline unsigned int blocks_per_huge_page(struct hstate *h)
+static inline unsigned int blocks_per_huge_page(const struct hstate *h)
 {
 	return huge_page_size(h) / 512;
 }
