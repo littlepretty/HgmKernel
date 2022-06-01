@@ -140,6 +140,37 @@ void hugetlb_remove_rmap(struct page *subpage, unsigned long shift,
 			page_remove_rmap(subpage, vma, false);
 	}
 }
+/*
+ * hugetlb_add_file_rmap() - increment the mapcounts for file-backed hugetlb
+ * pages appropriately.
+ *
+ * For pages that are being mapped with their hstate-level PTE (e.g., a 1G page
+ * being mapped with a 1G PUD), then we increment the compound_mapcount for the
+ * head page.
+ *
+ * For pages that are being mapped with high-granularity, we increment the
+ * mapcounts for the individual subpages that are getting mapped.
+ */
+void hugetlb_add_file_rmap(struct page *subpage, unsigned long shift,
+			   struct hstate *h, struct vm_area_struct *vma)
+{
+	struct page *hpage = compound_head(subpage);
+
+	if (shift == huge_page_shift(h)) {
+		VM_BUG_ON_PAGE(subpage != hpage, subpage);
+		page_add_file_rmap(hpage, vma, true);
+	} else {
+		unsigned long nr_subpages = 1UL << (shift - PAGE_SHIFT);
+		struct page *final_page = &subpage[nr_subpages];
+
+		VM_BUG_ON_PAGE(HPageVmemmapOptimized(hpage), hpage);
+		/*
+		 * Increment the mapcount on each page that is getting mapped.
+		 */
+		for (; subpage < final_page; ++subpage)
+			page_add_file_rmap(subpage, vma, false);
+	}
+}
 
 static inline bool subpool_is_free(struct hugepage_subpool *spool)
 {
@@ -5149,7 +5180,8 @@ int copy_hugetlb_page_range(struct mm_struct *dst, struct mm_struct *src,
 			    struct vm_area_struct *src_vma)
 {
 	pte_t *src_pte, *dst_pte, entry;
-	struct page *ptepage;
+	struct hugetlb_pte src_hpte, dst_hpte;
+	struct page *ptepage, *hpage;
 	unsigned long addr;
 	bool cow = is_cow_mapping(src_vma->vm_flags);
 	struct hstate *h = hstate_vma(src_vma);
@@ -5169,26 +5201,34 @@ int copy_hugetlb_page_range(struct mm_struct *dst, struct mm_struct *src,
 	} else {
 		/*
 		 * For shared mappings the vma lock must be held before
-		 * calling hugetlb_walk() in the src vma. Otherwise, the
-		 * returned ptep could go away if part of a shared pmd and
-		 * another thread calls huge_pmd_unshare.
+		 * calling hugetlb_full_walk() in the src vma. Otherwise, the
+		 * returned hpte could go away if
+		 *  - part of a shared pmd and another thread calls
+		 *  - huge_pmd_unshare, or
+		 *  - another thread collapses a high-granularity mapping.
 		 */
 		hugetlb_vma_lock_read(src_vma);
 	}
 
 	last_addr_mask = hugetlb_mask_last_page(h);
-	for (addr = src_vma->vm_start; addr < src_vma->vm_end; addr += sz) {
+	addr = src_vma->vm_start;
+	while (addr < src_vma->vm_end) {
 		spinlock_t *src_ptl, *dst_ptl;
-		src_pte = hugetlb_walk(src_vma, addr, sz);
-		if (!src_pte) {
-			addr |= last_addr_mask;
+		unsigned long hpte_sz;
+
+		if (hugetlb_full_walk(&src_hpte, src_vma, addr)) {
+			addr = (addr | last_addr_mask) + sz;
 			continue;
 		}
-		dst_pte = huge_pte_alloc(dst, dst_vma, addr, sz);
-		if (!dst_pte) {
-			ret = -ENOMEM;
+		ret = hugetlb_full_walk_alloc(&dst_hpte, dst_vma, addr,
+				hugetlb_pte_size(&src_hpte));
+		if (ret)
 			break;
-		}
+
+		src_pte = src_hpte.ptep;
+		dst_pte = dst_hpte.ptep;
+
+		hpte_sz = hugetlb_pte_size(&src_hpte);
 
 		/*
 		 * If the pagetables are shared don't copy or take references.
@@ -5198,13 +5238,14 @@ int copy_hugetlb_page_range(struct mm_struct *dst, struct mm_struct *src,
 		 * another vma. So page_count of ptep page is checked instead
 		 * to reliably determine whether pte is shared.
 		 */
-		if (page_count(virt_to_page(dst_pte)) > 1) {
-			addr |= last_addr_mask;
+		if (hugetlb_pte_size(&dst_hpte) == sz &&
+		    page_count(virt_to_page(dst_pte)) > 1) {
+			addr = (addr | last_addr_mask) + sz;
 			continue;
 		}
 
-		dst_ptl = huge_pte_lock(h, dst, dst_pte);
-		src_ptl = huge_pte_lockptr(huge_page_shift(h), src, src_pte);
+		dst_ptl = hugetlb_pte_lock(&dst_hpte);
+		src_ptl = hugetlb_pte_lockptr(&src_hpte);
 		spin_lock_nested(src_ptl, SINGLE_DEPTH_NESTING);
 		entry = huge_ptep_get(src_pte);
 again:
@@ -5248,10 +5289,15 @@ again:
 			 */
 			if (userfaultfd_wp(dst_vma))
 				set_huge_pte_at(dst, addr, dst_pte, entry);
+		} else if (!hugetlb_pte_present_leaf(&src_hpte, entry)) {
+			/* Retry the walk. */
+			spin_unlock(src_ptl);
+			spin_unlock(dst_ptl);
+			continue;
 		} else {
-			entry = huge_ptep_get(src_pte);
 			ptepage = pte_page(entry);
-			get_page(ptepage);
+			hpage = compound_head(ptepage);
+			get_page(hpage);
 
 			/*
 			 * Failing to duplicate the anon rmap is a rare case
@@ -5263,25 +5309,32 @@ again:
 			 * need to be without the pgtable locks since we could
 			 * sleep during the process.
 			 */
-			if (!PageAnon(ptepage)) {
-				page_add_file_rmap(ptepage, true);
-			} else if (page_try_dup_anon_rmap(ptepage, true,
+			if (!PageAnon(hpage)) {
+				hugetlb_add_file_rmap(ptepage,
+						src_hpte.shift, h, src_vma);
+			} else if (page_try_dup_anon_rmap(hpage, true,
 							  src_vma)) {
 				pte_t src_pte_old = entry;
 				struct page *new;
+
+				if (hugetlb_pte_size(&src_hpte) != sz) {
+					put_page(hpage);
+					ret = -EINVAL;
+					break;
+				}
 
 				spin_unlock(src_ptl);
 				spin_unlock(dst_ptl);
 				/* Do not use reserve as it's private owned */
 				new = alloc_huge_page(dst_vma, addr, 1);
 				if (IS_ERR(new)) {
-					put_page(ptepage);
+					put_page(hpage);
 					ret = PTR_ERR(new);
 					break;
 				}
-				copy_user_huge_page(new, ptepage, addr, dst_vma,
+				copy_user_huge_page(new, hpage, addr, dst_vma,
 						    npages);
-				put_page(ptepage);
+				put_page(hpage);
 
 				/* Install the new huge page if src pte stable */
 				dst_ptl = huge_pte_lock(h, dst, dst_pte);
@@ -5299,6 +5352,7 @@ again:
 				hugetlb_install_page(dst_vma, dst_pte, addr, new);
 				spin_unlock(src_ptl);
 				spin_unlock(dst_ptl);
+				addr += hugetlb_pte_size(&src_hpte);
 				continue;
 			}
 
@@ -5315,10 +5369,13 @@ again:
 			}
 
 			set_huge_pte_at(dst, addr, dst_pte, entry);
-			hugetlb_count_add(npages, dst);
+			hugetlb_count_add(
+					hugetlb_pte_size(&dst_hpte) / PAGE_SIZE,
+					dst);
 		}
 		spin_unlock(src_ptl);
 		spin_unlock(dst_ptl);
+		addr += hugetlb_pte_size(&src_hpte);
 	}
 
 	if (cow) {
