@@ -1038,6 +1038,18 @@ static int madvise_split(struct vm_area_struct *vma,
 #endif
 }
 
+static int madvise_collapse(struct vm_area_struct *vma,
+			    struct vm_area_struct **prev,
+			    unsigned long start, unsigned long end)
+{
+	if (is_vm_hugetlb_page(vma)) {
+		*prev = vma;
+		return hugetlb_collapse(vma->vm_mm, vma, start, end);
+	}
+
+	return madvise_collapse_thp(vma, prev, start, end);
+}
+
 /*
  * Apply an madvise behavior to a region of a vma.  madvise_update_vma
  * will handle splitting a vm area into separate areas, each area with its own
@@ -1214,6 +1226,9 @@ madvise_behavior_valid(int behavior)
 #ifdef CONFIG_TRANSPARENT_HUGEPAGE
 	case MADV_HUGEPAGE:
 	case MADV_NOHUGEPAGE:
+#endif
+#if defined(CONFIG_HUGETLB_HIGH_GRANULARITY_MAPPING) || \
+		defined(CONFIG_TRANSPARENT_HUGEPAGE)
 	case MADV_COLLAPSE:
 #endif
 #ifdef CONFIG_HUGETLB_HIGH_GRANULARITY_MAPPING
@@ -1407,7 +1422,8 @@ int madvise_set_anon_name(struct mm_struct *mm, unsigned long start,
  *  MADV_NOHUGEPAGE - mark the given range as not worth being backed by
  *		transparent huge pages so the existing pages will not be
  *		coalesced into THP and new pages will not be allocated as THP.
- *  MADV_COLLAPSE - synchronously coalesce pages into new THP.
+ *  MADV_COLLAPSE - synchronously coalesce pages into new THP, or, for HugeTLB
+ *		pages, collapse the mapping.
  *  MADV_DONTDUMP - the application wants to prevent pages in the given range
  *		from being included in its core dump.
  *  MADV_DODUMP - cancel MADV_DONTDUMP: no longer exclude from core dump.
