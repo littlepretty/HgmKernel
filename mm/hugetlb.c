@@ -7889,6 +7889,171 @@ found:
 	return 0;
 }
 
+static bool hugetlb_hgm_collapsable(struct vm_area_struct *vma)
+{
+	if (!hugetlb_hgm_eligible(vma))
+		return false;
+	if (!vma->vm_private_data)	/* vma lock required for collapsing */
+		return false;
+	return true;
+}
+
+/*
+ * Collapse the address range from @start to @end to be mapped optimally.
+ *
+ * This is only valid for shared mappings. The main use case for this function
+ * is following UFFDIO_CONTINUE. If a user UFFDIO_CONTINUEs an entire hugepage
+ * by calling UFFDIO_CONTINUE once for each 4K region, the kernel doesn't know
+ * to collapse the mapping after the final UFFDIO_CONTINUE. Instead, we leave
+ * it up to userspace to tell us to do so, via MADV_COLLAPSE.
+ *
+ * Any holes in the mapping will be filled. If there is no page in the
+ * pagecache for a region we're collapsing, the PTEs will be cleared.
+ *
+ * If high-granularity PTEs are uffd-wp markers, those markers will be dropped.
+ */
+int hugetlb_collapse(struct mm_struct *mm, struct vm_area_struct *vma,
+			    unsigned long start, unsigned long end)
+{
+	struct hstate *h = hstate_vma(vma);
+	struct address_space *mapping = vma->vm_file->f_mapping;
+	struct mmu_notifier_range range;
+	struct mmu_gather tlb;
+	unsigned long curr = start;
+	int ret = 0;
+	struct page *hpage, *subpage;
+	pgoff_t idx;
+	bool writable = vma->vm_flags & VM_WRITE;
+	bool shared = vma->vm_flags & VM_SHARED;
+	struct hugetlb_pte hpte;
+	pte_t entry;
+
+	/*
+	 * This is only supported for shared VMAs, because we need to look up
+	 * the page to use for any PTEs we end up creating.
+	 */
+	if (!shared)
+		return -EINVAL;
+
+	/* If HGM is not enabled, there is nothing to collapse. */
+	if (!hugetlb_hgm_enabled(vma))
+		return 0;
+
+	/*
+	 * We lost the VMA lock after splitting, so we can't safely collapse.
+	 * We could improve this in the future (like take the mmap_lock for
+	 * writing and try again), but for now just fail with ENOMEM.
+	 */
+	if (unlikely(!hugetlb_hgm_collapsable(vma)))
+		return -ENOMEM;
+
+	mmu_notifier_range_init(&range, MMU_NOTIFY_CLEAR, 0, mm, start, end);
+	mmu_notifier_invalidate_range_start(&range);
+	tlb_gather_mmu(&tlb, mm);
+
+	/*
+	 * Grab the VMA lock and mapping sem for writing. This will prevent
+	 * concurrent high-granularity page table walks, so that we can safely
+	 * collapse and free page tables.
+	 *
+	 * This is the same locking that huge_pmd_unshare requires.
+	 */
+	hugetlb_vma_lock_write(vma);
+	i_mmap_lock_write(vma->vm_file->f_mapping);
+
+	while (curr < end) {
+		ret = hugetlb_alloc_largest_pte(&hpte, mm, vma, curr, end);
+		if (ret)
+			goto out;
+
+		entry = huge_ptep_get(hpte.ptep);
+
+		/*
+		 * There is no work to do if the PTE doesn't point to page
+		 * tables.
+		 */
+		if (!pte_present(entry))
+			goto next_hpte;
+		if (hugetlb_pte_present_leaf(&hpte, entry))
+			goto next_hpte;
+
+		idx = vma_hugecache_offset(h, vma, curr);
+		hpage = find_get_page(mapping, idx);
+
+		if (hpage && !HPageMigratable(hpage)) {
+			/*
+			 * Don't collapse a mapping to a page that is pending
+			 * a migration. Migration swap entries may have placed
+			 * in the page table.
+			 */
+			ret = -EBUSY;
+			put_page(hpage);
+			goto out;
+		}
+
+		if (hpage && PageHWPoison(hpage)) {
+			/*
+			 * Don't collapse a mapping to a page that is
+			 * hwpoisoned.
+			 */
+			ret = -EHWPOISON;
+			put_page(hpage);
+			/*
+			 * By setting ret to -EHWPOISON, if nothing else
+			 * happens, we will tell userspace that we couldn't
+			 * fully collapse everything due to poison.
+			 *
+			 * Skip this page, and continue to collapse the rest
+			 * of the mapping.
+			 */
+			curr = (curr & huge_page_mask(h)) + huge_page_size(h);
+			continue;
+		}
+
+		/*
+		 * Clear all the PTEs, and drop ref/mapcounts
+		 * (on tlb_finish_mmu).
+		 */
+		__unmap_hugepage_range(&tlb, vma, curr,
+			curr + hugetlb_pte_size(&hpte),
+			NULL,
+			ZAP_FLAG_DROP_MARKER);
+		/* Free the PTEs. */
+		hugetlb_free_pgd_range(&tlb,
+				curr, curr + hugetlb_pte_size(&hpte),
+				curr, curr + hugetlb_pte_size(&hpte));
+		if (!hpage) {
+			huge_pte_clear(mm, curr, hpte.ptep,
+					hugetlb_pte_size(&hpte));
+			goto next_hpte;
+		}
+
+		page_dup_file_rmap(hpage, true);
+
+		subpage = hugetlb_find_subpage(h, hpage, curr);
+		entry = make_huge_pte_with_shift(vma, subpage,
+						 writable, hpte.shift);
+		set_huge_pte_at(mm, curr, hpte.ptep, entry);
+next_hpte:
+		curr += hugetlb_pte_size(&hpte);
+
+		if (curr < end) {
+			/* Don't hold the locks for too long. */
+			i_mmap_unlock_write(vma->vm_file->f_mapping);
+			hugetlb_vma_unlock_write(vma);
+			cond_resched();
+			hugetlb_vma_lock_write(vma);
+			i_mmap_lock_write(vma->vm_file->f_mapping);
+		}
+	}
+out:
+	i_mmap_unlock_write(vma->vm_file->f_mapping);
+	hugetlb_vma_unlock_write(vma);
+	tlb_finish_mmu(&tlb);
+	mmu_notifier_invalidate_range_end(&range);
+	return ret;
+}
+
 #endif /* CONFIG_HUGETLB_HIGH_GRANULARITY_MAPPING */
 
 /*
