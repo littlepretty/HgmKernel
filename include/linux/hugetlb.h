@@ -1289,6 +1289,8 @@ bool hugetlb_hgm_eligible(struct vm_area_struct *vma);
 int hugetlb_alloc_largest_pte(struct hugetlb_pte *hpte, struct mm_struct *mm,
 			      struct vm_area_struct *vma, unsigned long start,
 			      unsigned long end);
+int hugetlb_collapse(struct mm_struct *mm,
+		     unsigned long start, unsigned long end);
 #else
 static inline bool hugetlb_hgm_enabled(struct vm_area_struct *vma)
 {
@@ -1306,6 +1308,12 @@ static inline
 int hugetlb_alloc_largest_pte(struct hugetlb_pte *hpte, struct mm_struct *mm,
 			      struct vm_area_struct *vma, unsigned long start,
 			      unsigned long end)
+{
+	return -EINVAL;
+}
+static inline
+int hugetlb_collapse(struct mm_struct *mm, struct vm_area_struct *vma,
+		     unsigned long start, unsigned long end)
 {
 	return -EINVAL;
 }
