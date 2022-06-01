@@ -4905,7 +4905,8 @@ int copy_hugetlb_page_range(struct mm_struct *dst, struct mm_struct *src,
 			    struct vm_area_struct *src_vma)
 {
 	pte_t *src_pte, *dst_pte, entry, dst_entry;
-	struct page *ptepage;
+	struct hugetlb_pte src_hpte, dst_hpte;
+	struct page *ptepage, *hpage;
 	unsigned long addr;
 	bool cow = is_cow_mapping(src_vma->vm_flags);
 	struct hstate *h = hstate_vma(src_vma);
@@ -4923,22 +4924,25 @@ int copy_hugetlb_page_range(struct mm_struct *dst, struct mm_struct *src,
 		mmu_notifier_invalidate_range_start(&range);
 		mmap_assert_write_locked(src);
 		raw_write_seqcount_begin(&src->write_protect_seq);
-	} else {
-		/*
-		 * For shared mappings i_mmap_rwsem must be held to call
-		 * huge_pte_alloc, otherwise the returned ptep could go
-		 * away if part of a shared pmd and another thread calls
-		 * huge_pmd_unshare.
-		 */
-		i_mmap_lock_read(mapping);
 	}
 
+	/*
+	 * For shared mappings i_mmap_rwsem must be held to call
+	 * huge_pte_alloc, otherwise the returned ptep could go
+	 * away if part of a shared pmd and another thread calls
+	 * huge_pmd_unshare.
+	 */
+	i_mmap_lock_read(mapping);
+
 	last_addr_mask = hugetlb_mask_last_page(h);
-	for (addr = src_vma->vm_start; addr < src_vma->vm_end; addr += sz) {
+	addr = src_vma->vm_start;
+	while (addr < src_vma->vm_end) {
 		spinlock_t *src_ptl, *dst_ptl;
+		unsigned long hpte_sz;
 		src_pte = huge_pte_offset(src, addr, sz);
 		if (!src_pte) {
 			addr |= last_addr_mask;
+			addr += sz;
 			continue;
 		}
 		dst_pte = huge_pte_alloc(dst, dst_vma, addr, sz);
@@ -4946,6 +4950,27 @@ int copy_hugetlb_page_range(struct mm_struct *dst, struct mm_struct *src,
 			ret = -ENOMEM;
 			break;
 		}
+
+		hugetlb_pte_populate(&src_hpte, src_pte, huge_page_shift(h),
+				hpage_size_to_level(huge_page_size(h)));
+		hugetlb_pte_populate(&dst_hpte, dst_pte, huge_page_shift(h),
+				hpage_size_to_level(huge_page_size(h)));
+
+		if (hugetlb_hgm_enabled(src_vma)) {
+			BUG_ON(!hugetlb_hgm_enabled(dst_vma));
+			hugetlb_hgm_walk(src, src_vma, &src_hpte, addr,
+				      PAGE_SIZE, /*stop_at_none=*/true);
+			ret = hugetlb_hgm_walk(dst, dst_vma, &dst_hpte, addr,
+					hugetlb_pte_size(&src_hpte),
+					/*stop_at_none=*/false);
+			if (ret)
+				break;
+
+			src_pte = src_hpte.ptep;
+			dst_pte = dst_hpte.ptep;
+		}
+
+		hpte_sz = hugetlb_pte_size(&src_hpte);
 
 		/*
 		 * If the pagetables are shared don't copy or take references.
@@ -4959,11 +4984,12 @@ int copy_hugetlb_page_range(struct mm_struct *dst, struct mm_struct *src,
 		dst_entry = huge_ptep_get(dst_pte);
 		if ((dst_pte == src_pte) || !huge_pte_none(dst_entry)) {
 			addr |= last_addr_mask;
+			addr += hugetlb_pte_size(&src_hpte);
 			continue;
 		}
 
-		dst_ptl = huge_pte_lock(h, dst, dst_pte);
-		src_ptl = huge_pte_lockptr(huge_page_shift(h), src, src_pte);
+		dst_ptl = hugetlb_pte_lock(dst, &dst_hpte);
+		src_ptl = hugetlb_pte_lockptr(src, &src_hpte);
 		spin_lock_nested(src_ptl, SINGLE_DEPTH_NESTING);
 		entry = huge_ptep_get(src_pte);
 		dst_entry = huge_ptep_get(dst_pte);
@@ -5007,10 +5033,16 @@ again:
 			 */
 			if (userfaultfd_wp(dst_vma))
 				set_huge_pte_at(dst, addr, dst_pte, entry);
+		} else if (!hugetlb_pte_present_leaf(&src_hpte)) {
+			/* Retry the walk. */
+			spin_unlock(src_ptl);
+			spin_unlock(dst_ptl);
+			continue;
 		} else {
 			entry = huge_ptep_get(src_pte);
 			ptepage = pte_page(entry);
-			get_page(ptepage);
+			hpage = compound_head(ptepage);
+			get_page(hpage);
 
 			/*
 			 * Failing to duplicate the anon rmap is a rare case
@@ -5023,24 +5055,31 @@ again:
 			 * sleep during the process.
 			 */
 			if (!PageAnon(ptepage)) {
-				page_dup_file_rmap(ptepage, true);
-			} else if (page_try_dup_anon_rmap(ptepage, true,
+				page_dup_file_rmap(hpage, true);
+			} else if (page_try_dup_anon_rmap(hpage, true,
 							  src_vma)) {
 				pte_t src_pte_old = entry;
 				struct page *new;
+
+				if (hugetlb_hgm_enabled(src_vma)) {
+					ret = -EINVAL;
+					break;
+				}
+				BUG_ON(!IS_ALIGNED(addr, hugetlb_pte_size(
+								&src_hpte)));
 
 				spin_unlock(src_ptl);
 				spin_unlock(dst_ptl);
 				/* Do not use reserve as it's private owned */
 				new = alloc_huge_page(dst_vma, addr, 1);
 				if (IS_ERR(new)) {
-					put_page(ptepage);
+					put_page(hpage);
 					ret = PTR_ERR(new);
 					break;
 				}
-				copy_user_huge_page(new, ptepage, addr, dst_vma,
+				copy_user_huge_page(new, hpage, addr, dst_vma,
 						    npages);
-				put_page(ptepage);
+				put_page(hpage);
 
 				/* Install the new huge page if src pte stable */
 				dst_ptl = huge_pte_lock(h, dst, dst_pte);
@@ -5058,6 +5097,7 @@ again:
 				hugetlb_install_page(dst_vma, dst_pte, addr, new);
 				spin_unlock(src_ptl);
 				spin_unlock(dst_ptl);
+				addr += hugetlb_pte_size(&src_hpte);
 				continue;
 			}
 
@@ -5074,18 +5114,20 @@ again:
 			}
 
 			set_huge_pte_at(dst, addr, dst_pte, entry);
-			hugetlb_count_add(npages, dst);
+			hugetlb_count_add(
+					hugetlb_pte_size(&dst_hpte) / PAGE_SIZE,
+					dst);
 		}
 		spin_unlock(src_ptl);
 		spin_unlock(dst_ptl);
+		addr += hugetlb_pte_size(&src_hpte);
 	}
 
 	if (cow) {
 		raw_write_seqcount_end(&src->write_protect_seq);
 		mmu_notifier_invalidate_range_end(&range);
-	} else {
-		i_mmap_unlock_read(mapping);
 	}
+	i_mmap_unlock_read(mapping);
 
 	return ret;
 }
