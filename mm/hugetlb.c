@@ -8000,6 +8000,158 @@ found:
 	return 0;
 }
 
+/*
+ * Collapse the address range from @start to @end to be mapped optimally.
+ *
+ * This is only valid for shared mappings. The main use case for this function
+ * is following UFFDIO_CONTINUE. If a user UFFDIO_CONTINUEs an entire hugepage
+ * by calling UFFDIO_CONTINUE once for each 4K region, the kernel doesn't know
+ * to collapse the mapping after the final UFFDIO_CONTINUE. Instead, we leave
+ * it up to userspace to tell us to do so, via MADV_COLLAPSE.
+ *
+ * Any holes in the mapping will be filled. If there is no page in the
+ * pagecache for a region we're collapsing, the PTEs will be cleared.
+ *
+ * If high-granularity PTEs are uffd-wp markers, those markers will be dropped.
+ */
+static int __hugetlb_collapse(struct mm_struct *mm, struct vm_area_struct *vma,
+			      unsigned long start, unsigned long end)
+{
+	struct hstate *h = hstate_vma(vma);
+	struct address_space *mapping = vma->vm_file->f_mapping;
+	struct mmu_notifier_range range;
+	struct mmu_gather tlb;
+	unsigned long curr = start;
+	int ret = 0;
+	struct folio *folio;
+	struct page *subpage;
+	pgoff_t idx;
+	bool writable = vma->vm_flags & VM_WRITE;
+	struct hugetlb_pte hpte;
+	pte_t entry;
+	spinlock_t *ptl;
+
+	/*
+	 * This is only supported for shared VMAs, because we need to look up
+	 * the page to use for any PTEs we end up creating.
+	 */
+	if (!(vma->vm_flags & VM_MAYSHARE))
+		return -EINVAL;
+
+	/* If HGM is not enabled, there is nothing to collapse. */
+	if (!hugetlb_hgm_enabled(vma))
+		return 0;
+
+	tlb_gather_mmu(&tlb, mm);
+
+	mmu_notifier_range_init(&range, MMU_NOTIFY_CLEAR, 0, mm, start, end);
+	mmu_notifier_invalidate_range_start(&range);
+
+	while (curr < end) {
+		ret = hugetlb_alloc_largest_pte(&hpte, mm, vma, curr, end);
+		if (ret)
+			goto out;
+
+		entry = huge_ptep_get(hpte.ptep);
+
+		/*
+		 * There is no work to do if the PTE doesn't point to page
+		 * tables.
+		 */
+		if (!pte_present(entry))
+			goto next_hpte;
+		if (hugetlb_pte_present_leaf(&hpte, entry))
+			goto next_hpte;
+
+		idx = vma_hugecache_offset(h, vma, curr);
+		folio = filemap_get_folio(mapping, idx);
+
+		if (folio && folio_test_hwpoison(folio)) {
+			/*
+			 * Don't collapse a mapping to a page that is
+			 * hwpoisoned. The entire page will be poisoned.
+			 *
+			 * When HugeTLB supports poisoning PAGE_SIZE bits of
+			 * the hugepage, the logic here can be improved.
+			 *
+			 * Skip this page, and continue to collapse the rest
+			 * of the mapping.
+			 */
+			folio_put(folio);
+			curr = (curr & huge_page_mask(h)) + huge_page_size(h);
+			continue;
+		}
+
+		if (folio && !folio_test_hugetlb_migratable(folio)) {
+			/*
+			 * Don't collapse a mapping to a page that is pending
+			 * a migration. Migration swap entries may have placed
+			 * in the page table.
+			 */
+			ret = -EBUSY;
+			folio_put(folio);
+			goto out;
+		}
+
+		/*
+		 * Clear all the PTEs, and drop ref/mapcounts
+		 * (on tlb_finish_mmu).
+		 */
+		__unmap_hugepage_range(&tlb, vma, curr,
+			curr + hugetlb_pte_size(&hpte),
+			NULL,
+			ZAP_FLAG_DROP_MARKER);
+		/* Free the PTEs. */
+		hugetlb_free_pgd_range(&tlb,
+				curr, curr + hugetlb_pte_size(&hpte),
+				curr, curr + hugetlb_pte_size(&hpte));
+
+		ptl = hugetlb_pte_lock(&hpte);
+
+		if (!folio) {
+			huge_pte_clear(mm, curr, hpte.ptep,
+					hugetlb_pte_size(&hpte));
+			spin_unlock(ptl);
+			goto next_hpte;
+		}
+
+		subpage = hugetlb_find_subpage(h, folio, curr);
+		entry = make_huge_pte_with_shift(vma, subpage,
+						 writable, hpte.shift);
+		hugetlb_add_file_rmap(subpage, hpte.shift, h, vma);
+		set_huge_pte_at(mm, curr, hpte.ptep, entry);
+		spin_unlock(ptl);
+next_hpte:
+		curr += hugetlb_pte_size(&hpte);
+	}
+out:
+	mmu_notifier_invalidate_range_end(&range);
+	tlb_finish_mmu(&tlb);
+
+	return ret;
+}
+
+int hugetlb_collapse(struct mm_struct *mm, unsigned long start,
+		     unsigned long end)
+{
+	int ret = 0;
+	struct vm_area_struct *vma;
+
+	mmap_write_lock(mm);
+	while (start < end || ret) {
+		vma = find_vma(mm, start);
+		if (!vma || !is_vm_hugetlb_page(vma)) {
+			ret = -EINVAL;
+			break;
+		}
+		ret = __hugetlb_collapse(mm, vma, start,
+				end < vma->vm_end ? end : vma->vm_end);
+		start = vma->vm_end;
+	}
+	mmap_write_unlock(mm);
+	return ret;
+}
+
 #endif /* CONFIG_HUGETLB_HIGH_GRANULARITY_MAPPING */
 
 /*
