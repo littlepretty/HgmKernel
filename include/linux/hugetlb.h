@@ -1189,6 +1189,8 @@ int huge_pte_alloc_high_granularity(struct hugetlb_pte *hpte,
 				    unsigned int desired_sz,
 				    enum split_mode mode,
 				    bool write_locked);
+int hugetlb_collapse(struct mm_struct *mm, struct vm_area_struct *vma,
+		     unsigned long start, unsigned long end);
 #else
 static inline bool hugetlb_hgm_enabled(struct vm_area_struct *vma) {
 	return false;
@@ -1209,6 +1211,11 @@ static inline int huge_pte_alloc_high_granularity(struct hugetlb_pte *hpte,
 					   unsigned int desired_sz,
 					   enum split_mode mode,
 					   bool write_locked)
+{
+	return -EINVAL;
+}
+int hugetlb_collapse(struct mm_struct *mm, struct vm_area_struct *vma,
+		     unsigned long start, unsigned long end)
 {
 	return -EINVAL;
 }
