@@ -4855,7 +4855,8 @@ int copy_hugetlb_page_range(struct mm_struct *dst, struct mm_struct *src,
 			    struct vm_area_struct *src_vma)
 {
 	pte_t *src_pte, *dst_pte, entry, dst_entry;
-	struct page *ptepage;
+	struct hugetlb_pte src_hpte, dst_hpte;
+	struct page *ptepage, *hpage;
 	unsigned long addr;
 	bool cow = is_cow_mapping(src_vma->vm_flags);
 	struct hstate *h = hstate_vma(src_vma);
@@ -4882,16 +4883,42 @@ int copy_hugetlb_page_range(struct mm_struct *dst, struct mm_struct *src,
 		i_mmap_lock_read(mapping);
 	}
 
-	for (addr = src_vma->vm_start; addr < src_vma->vm_end; addr += sz) {
+	addr = src_vma->vm_start;
+	while (addr < src_vma->vm_end) {
 		spinlock_t *src_ptl, *dst_ptl;
+		unsigned long hpte_sz;
 		src_pte = huge_pte_offset(src, addr, sz);
-		if (!src_pte)
+		if (!src_pte) {
+			addr += sz;
 			continue;
+		}
 		dst_pte = huge_pte_alloc(dst, dst_vma, addr, sz);
 		if (!dst_pte) {
 			ret = -ENOMEM;
 			break;
 		}
+
+		hugetlb_pte_populate(&src_hpte, src_pte, huge_page_shift(h));
+		hugetlb_pte_populate(&dst_hpte, dst_pte, huge_page_shift(h));
+
+		if (hugetlb_hgm_enabled(src_vma)) {
+			BUG_ON(!hugetlb_hgm_enabled(dst_vma));
+			ret = hugetlb_walk_to(src, &src_hpte, addr,
+					      PAGE_SIZE, /*stop_at_none=*/true);
+			if (ret)
+				break;
+			ret = huge_pte_alloc_high_granularity(
+					&dst_hpte, dst, dst_vma, addr,
+					hugetlb_pte_shift(&src_hpte),
+					SPLIT_NONE, /*write_locked=*/false);
+			if (ret)
+				break;
+
+			src_pte = src_hpte.ptep;
+			dst_pte = dst_hpte.ptep;
+		}
+
+		hpte_sz = hugetlb_pte_size(&src_hpte);
 
 		/*
 		 * If the pagetables are shared don't copy or take references.
@@ -4903,16 +4930,17 @@ int copy_hugetlb_page_range(struct mm_struct *dst, struct mm_struct *src,
 		 * after taking the lock below.
 		 */
 		dst_entry = huge_ptep_get(dst_pte);
-		if ((dst_pte == src_pte) || !huge_pte_none(dst_entry))
+		if ((dst_pte == src_pte) || !hugetlb_pte_none(&dst_hpte))
 			continue;
 
-		dst_ptl = huge_pte_lock(h, dst, dst_pte);
-		src_ptl = huge_pte_lockptr(huge_page_shift(h), src, src_pte);
+		dst_ptl = hugetlb_pte_lock(dst, &dst_hpte);
+		src_ptl = hugetlb_pte_lockptr(src, &src_hpte);
 		spin_lock_nested(src_ptl, SINGLE_DEPTH_NESTING);
 		entry = huge_ptep_get(src_pte);
 		dst_entry = huge_ptep_get(dst_pte);
 again:
-		if (huge_pte_none(entry) || !huge_pte_none(dst_entry)) {
+		if (hugetlb_pte_none(&src_hpte) ||
+		    !hugetlb_pte_none(&dst_hpte)) {
 			/*
 			 * Skip if src entry none.  Also, skip in the
 			 * unlikely case dst entry !none as this implies
@@ -4935,11 +4963,12 @@ again:
 				if (userfaultfd_wp(src_vma) && uffd_wp)
 					entry = huge_pte_mkuffd_wp(entry);
 				set_huge_swap_pte_at(src, addr, src_pte,
-						     entry, sz);
+						     entry, hpte_sz);
 			}
 			if (!userfaultfd_wp(dst_vma) && uffd_wp)
 				entry = huge_pte_clear_uffd_wp(entry);
-			set_huge_swap_pte_at(dst, addr, dst_pte, entry, sz);
+			set_huge_swap_pte_at(dst, addr, dst_pte, entry,
+					     hpte_sz);
 		} else if (unlikely(is_pte_marker(entry))) {
 			/*
 			 * We copy the pte marker only if the dst vma has
@@ -4950,7 +4979,8 @@ again:
 		} else {
 			entry = huge_ptep_get(src_pte);
 			ptepage = pte_page(entry);
-			get_page(ptepage);
+			hpage = compound_head(ptepage);
+			get_page(hpage);
 
 			/*
 			 * Failing to duplicate the anon rmap is a rare case
@@ -4966,6 +4996,11 @@ again:
 				page_dup_file_rmap(ptepage, true);
 			} else if (page_try_dup_anon_rmap(ptepage, true,
 							  src_vma)) {
+				if (hugetlb_hgm_enabled(src_vma)) {
+					ret = -EINVAL;
+					break;
+				}
+				BUG_ON(!IS_ALIGNED(addr, hugetlb_pte_size(&src_hpte)));
 				pte_t src_pte_old = entry;
 				struct page *new;
 
@@ -4974,13 +5009,13 @@ again:
 				/* Do not use reserve as it's private owned */
 				new = alloc_huge_page(dst_vma, addr, 1);
 				if (IS_ERR(new)) {
-					put_page(ptepage);
+					put_page(hpage);
 					ret = PTR_ERR(new);
 					break;
 				}
-				copy_user_huge_page(new, ptepage, addr, dst_vma,
+				copy_user_huge_page(new, hpage, addr, dst_vma,
 						    npages);
-				put_page(ptepage);
+				put_page(hpage);
 
 				/* Install the new huge page if src pte stable */
 				dst_ptl = huge_pte_lock(h, dst, dst_pte);
@@ -5013,8 +5048,14 @@ again:
 				entry = huge_pte_wrprotect(entry);
 			}
 
+			// Only dup_rmap once for a page.
+			if (IS_ALIGNED(addr, sz))
+				page_dup_file_rmap(hpage, true);
+
 			set_huge_pte_at(dst, addr, dst_pte, entry);
-			hugetlb_count_add(npages, dst);
+			hugetlb_count_add(
+					hugetlb_pte_size(&dst_hpte) / PAGE_SIZE,
+					dst);
 		}
 		spin_unlock(src_ptl);
 		spin_unlock(dst_ptl);
