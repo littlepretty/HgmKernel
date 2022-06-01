@@ -59,6 +59,7 @@ static int madvise_need_mmap_write(int behavior)
 	case MADV_FREE:
 	case MADV_POPULATE_READ:
 	case MADV_POPULATE_WRITE:
+	case MADV_COLLAPSE:
 		return 0;
 	default:
 		/* be safe, default to 1. list exceptions explicitly */
@@ -981,6 +982,20 @@ static long madvise_remove(struct vm_area_struct *vma,
 	return error;
 }
 
+static int madvise_collapse(struct vm_area_struct *vma,
+			    struct vm_area_struct **prev,
+			    unsigned long start, unsigned long end)
+{
+	bool shared = vma->vm_flags & VM_SHARED;
+	*prev = vma;
+
+	// Only allow collapsing for HGM-enabled, shared mappings.
+	if (!is_vm_hugetlb_page(vma) || !hugetlb_hgm_enabled(vma) || !shared)
+		return -EINVAL;
+
+	return hugetlb_collapse(vma->vm_mm, vma, start, end);
+}
+
 /*
  * Apply an madvise behavior to a region of a vma.  madvise_update_vma
  * will handle splitting a vm area into separate areas, each area with its own
@@ -1011,6 +1026,8 @@ static int madvise_vma_behavior(struct vm_area_struct *vma,
 	case MADV_POPULATE_READ:
 	case MADV_POPULATE_WRITE:
 		return madvise_populate(vma, prev, start, end, behavior);
+	case MADV_COLLAPSE:
+		return madvise_collapse(vma, prev, start, end);
 	case MADV_NORMAL:
 		new_flags = new_flags & ~VM_RAND_READ & ~VM_SEQ_READ;
 		break;
@@ -1158,6 +1175,9 @@ madvise_behavior_valid(int behavior)
 #ifdef CONFIG_MEMORY_FAILURE
 	case MADV_SOFT_OFFLINE:
 	case MADV_HWPOISON:
+#endif
+#ifdef CONFIG_HUGETLB_HIGH_GRANULARITY_MAPPING
+	case MADV_COLLAPSE:
 #endif
 		return true;
 
@@ -1351,6 +1371,9 @@ int madvise_set_anon_name(struct mm_struct *mm, unsigned long start,
  *		triggering read faults if required
  *  MADV_POPULATE_WRITE - populate (prefault) page tables writable by
  *		triggering write faults if required
+ *  MADV_COLLAPSE - collapse a high-granularity HugeTLB mapping into huge
+ *  		mappings. This is useful after an entire hugepage has been
+ *  		mapped with individual small UFFDIO_CONTINUE operations.
  *
  * return values:
  *  zero    - success
