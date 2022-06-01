@@ -4814,7 +4814,8 @@ int copy_hugetlb_page_range(struct mm_struct *dst, struct mm_struct *src,
 			    struct vm_area_struct *src_vma)
 {
 	pte_t *src_pte, *dst_pte, entry, dst_entry;
-	struct page *ptepage;
+	struct hugetlb_pte src_hpte, dst_hpte;
+	struct page *ptepage, *hpage;
 	unsigned long addr;
 	bool cow = is_cow_mapping(src_vma->vm_flags);
 	struct hstate *h = hstate_vma(src_vma);
@@ -4832,22 +4833,28 @@ int copy_hugetlb_page_range(struct mm_struct *dst, struct mm_struct *src,
 		mmu_notifier_invalidate_range_start(&range);
 		mmap_assert_write_locked(src);
 		raw_write_seqcount_begin(&src->write_protect_seq);
-	} else {
-		/*
-		 * For shared mappings i_mmap_rwsem must be held to call
-		 * huge_pte_alloc, otherwise the returned ptep could go
-		 * away if part of a shared pmd and another thread calls
-		 * huge_pmd_unshare.
-		 */
-		i_mmap_lock_read(mapping);
 	}
 
+	/*
+	 * For shared mappings i_mmap_rwsem must be held to call
+	 * huge_pte_alloc, otherwise the returned ptep could go
+	 * away if part of a shared pmd and another thread calls
+	 * huge_pmd_unshare.
+	 *
+	 * We grab it for writing so that we never have to drop the
+	 * lock when splitting.
+	 */
+	i_mmap_lock_write(mapping);
+
 	last_addr_mask = hugetlb_mask_last_page(h);
-	for (addr = src_vma->vm_start; addr < src_vma->vm_end; addr += sz) {
+	addr = src_vma->vm_start;
+	while (addr < src_vma->vm_end) {
 		spinlock_t *src_ptl, *dst_ptl;
+		unsigned long hpte_sz;
 		src_pte = huge_pte_offset(src, addr, sz);
 		if (!src_pte) {
 			addr |= last_addr_mask;
+			addr += sz;
 			continue;
 		}
 		dst_pte = huge_pte_alloc(dst, dst_vma, addr, sz);
@@ -4855,6 +4862,31 @@ int copy_hugetlb_page_range(struct mm_struct *dst, struct mm_struct *src,
 			ret = -ENOMEM;
 			break;
 		}
+
+		hugetlb_pte_populate(&src_hpte, src_pte, huge_page_shift(h),
+				hpage_size_to_level(huge_page_size(h)));
+		hugetlb_pte_populate(&dst_hpte, dst_pte, huge_page_shift(h),
+				hpage_size_to_level(huge_page_size(h)));
+
+		if (hugetlb_hgm_enabled(src_vma)) {
+			BUG_ON(!hugetlb_hgm_enabled(dst_vma));
+			ret = hugetlb_walk_to(src, &src_hpte, addr,
+					      PAGE_SIZE, /*stop_at_none=*/true);
+			if (ret)
+				break;
+			ret = huge_pte_alloc_high_granularity(
+					&dst_hpte, dst, dst_vma, addr,
+					hugetlb_pte_shift(&src_hpte),
+					HUGETLB_SPLIT_NONE,
+					/*write_locked=*/true);
+			if (ret)
+				break;
+
+			src_pte = src_hpte.ptep;
+			dst_pte = dst_hpte.ptep;
+		}
+
+		hpte_sz = hugetlb_pte_size(&src_hpte);
 
 		/*
 		 * If the pagetables are shared don't copy or take references.
@@ -4868,11 +4900,12 @@ int copy_hugetlb_page_range(struct mm_struct *dst, struct mm_struct *src,
 		dst_entry = huge_ptep_get(dst_pte);
 		if ((dst_pte == src_pte) || !huge_pte_none(dst_entry)) {
 			addr |= last_addr_mask;
+			addr += hugetlb_pte_size(&src_hpte);
 			continue;
 		}
 
-		dst_ptl = huge_pte_lock(h, dst, dst_pte);
-		src_ptl = huge_pte_lockptr(huge_page_shift(h), src, src_pte);
+		dst_ptl = hugetlb_pte_lock(dst, &dst_hpte);
+		src_ptl = hugetlb_pte_lockptr(src, &src_hpte);
 		spin_lock_nested(src_ptl, SINGLE_DEPTH_NESTING);
 		entry = huge_ptep_get(src_pte);
 		dst_entry = huge_ptep_get(dst_pte);
@@ -4919,7 +4952,8 @@ again:
 		} else {
 			entry = huge_ptep_get(src_pte);
 			ptepage = pte_page(entry);
-			get_page(ptepage);
+			hpage = compound_head(ptepage);
+			get_page(hpage);
 
 			/*
 			 * Failing to duplicate the anon rmap is a rare case
@@ -4932,9 +4966,15 @@ again:
 			 * sleep during the process.
 			 */
 			if (!PageAnon(ptepage)) {
-				page_dup_file_rmap(ptepage, true);
-			} else if (page_try_dup_anon_rmap(ptepage, true,
+				page_dup_file_rmap(hpage, true);
+			} else if (page_try_dup_anon_rmap(hpage, true,
 							  src_vma)) {
+				if (hugetlb_hgm_enabled(src_vma)) {
+					ret = -EINVAL;
+					break;
+				}
+				BUG_ON(!IS_ALIGNED(addr, hugetlb_pte_size(
+								&src_hpte)));
 				pte_t src_pte_old = entry;
 				struct page *new;
 
@@ -4943,13 +4983,13 @@ again:
 				/* Do not use reserve as it's private owned */
 				new = alloc_huge_page(dst_vma, addr, 1);
 				if (IS_ERR(new)) {
-					put_page(ptepage);
+					put_page(hpage);
 					ret = PTR_ERR(new);
 					break;
 				}
-				copy_user_huge_page(new, ptepage, addr, dst_vma,
+				copy_user_huge_page(new, hpage, addr, dst_vma,
 						    npages);
-				put_page(ptepage);
+				put_page(hpage);
 
 				/* Install the new huge page if src pte stable */
 				dst_ptl = huge_pte_lock(h, dst, dst_pte);
@@ -4967,6 +5007,7 @@ again:
 				hugetlb_install_page(dst_vma, dst_pte, addr, new);
 				spin_unlock(src_ptl);
 				spin_unlock(dst_ptl);
+				addr += hugetlb_pte_size(&src_hpte);
 				continue;
 			}
 
@@ -4983,18 +5024,20 @@ again:
 			}
 
 			set_huge_pte_at(dst, addr, dst_pte, entry);
-			hugetlb_count_add(npages, dst);
+			hugetlb_count_add(
+					hugetlb_pte_size(&dst_hpte) / PAGE_SIZE,
+					dst);
 		}
 		spin_unlock(src_ptl);
 		spin_unlock(dst_ptl);
+		addr += hugetlb_pte_size(&src_hpte);
 	}
 
 	if (cow) {
 		raw_write_seqcount_end(&src->write_protect_seq);
 		mmu_notifier_invalidate_range_end(&range);
-	} else {
-		i_mmap_unlock_read(mapping);
 	}
+	i_mmap_unlock_write(mapping);
 
 	return ret;
 }
@@ -5755,6 +5798,7 @@ retry:
 		vma_end_reservation(h, vma, haddr);
 	}
 
+	/* This lock will get pretty expensive at 4K. */
 	ptl = hugetlb_pte_lock(mm, hpte);
 	ret = 0;
 	/* If pte changed from under us, retry */
@@ -6031,7 +6075,7 @@ out_mutex:
  * modifications for huge pages.
  */
 int hugetlb_mcopy_atomic_pte(struct mm_struct *dst_mm,
-			    pte_t *dst_pte,
+			    struct hugetlb_pte *dst_hpte,
 			    struct vm_area_struct *dst_vma,
 			    unsigned long dst_addr,
 			    unsigned long src_addr,
@@ -6042,13 +6086,14 @@ int hugetlb_mcopy_atomic_pte(struct mm_struct *dst_mm,
 	bool is_continue = (mode == MCOPY_ATOMIC_CONTINUE);
 	struct hstate *h = hstate_vma(dst_vma);
 	struct address_space *mapping = dst_vma->vm_file->f_mapping;
-	pgoff_t idx = vma_hugecache_offset(h, dst_vma, dst_addr);
+	unsigned long haddr = dst_addr & huge_page_mask(h);
+	pgoff_t idx = vma_hugecache_offset(h, dst_vma, haddr);
 	unsigned long size;
 	int vm_shared = dst_vma->vm_flags & VM_SHARED;
 	pte_t _dst_pte;
 	spinlock_t *ptl;
 	int ret = -ENOMEM;
-	struct page *page;
+	struct page *page, *subpage;
 	int writable;
 	bool page_in_pagecache = false;
 
@@ -6063,12 +6108,12 @@ int hugetlb_mcopy_atomic_pte(struct mm_struct *dst_mm,
 		 * a non-missing case. Return -EEXIST.
 		 */
 		if (vm_shared &&
-		    hugetlbfs_pagecache_present(h, dst_vma, dst_addr)) {
+		    hugetlbfs_pagecache_present(h, dst_vma, haddr)) {
 			ret = -EEXIST;
 			goto out;
 		}
 
-		page = alloc_huge_page(dst_vma, dst_addr, 0);
+		page = alloc_huge_page(dst_vma, haddr, 0);
 		if (IS_ERR(page)) {
 			ret = -ENOMEM;
 			goto out;
@@ -6084,13 +6129,13 @@ int hugetlb_mcopy_atomic_pte(struct mm_struct *dst_mm,
 			/* Free the allocated page which may have
 			 * consumed a reservation.
 			 */
-			restore_reserve_on_error(h, dst_vma, dst_addr, page);
+			restore_reserve_on_error(h, dst_vma, haddr, page);
 			put_page(page);
 
 			/* Allocate a temporary page to hold the copied
 			 * contents.
 			 */
-			page = alloc_huge_page_vma(h, dst_vma, dst_addr);
+			page = alloc_huge_page_vma(h, dst_vma, haddr);
 			if (!page) {
 				ret = -ENOMEM;
 				goto out;
@@ -6104,14 +6149,14 @@ int hugetlb_mcopy_atomic_pte(struct mm_struct *dst_mm,
 		}
 	} else {
 		if (vm_shared &&
-		    hugetlbfs_pagecache_present(h, dst_vma, dst_addr)) {
+		    hugetlbfs_pagecache_present(h, dst_vma, haddr)) {
 			put_page(*pagep);
 			ret = -EEXIST;
 			*pagep = NULL;
 			goto out;
 		}
 
-		page = alloc_huge_page(dst_vma, dst_addr, 0);
+		page = alloc_huge_page(dst_vma, haddr, 0);
 		if (IS_ERR(page)) {
 			put_page(*pagep);
 			ret = -ENOMEM;
@@ -6150,8 +6195,7 @@ int hugetlb_mcopy_atomic_pte(struct mm_struct *dst_mm,
 		page_in_pagecache = true;
 	}
 
-	ptl = huge_pte_lockptr(huge_page_shift(h), dst_mm, dst_pte);
-	spin_lock(ptl);
+	ptl = hugetlb_pte_lock(dst_mm, dst_hpte);
 
 	/*
 	 * Recheck the i_size after holding PT lock to make sure not
@@ -6173,7 +6217,7 @@ int hugetlb_mcopy_atomic_pte(struct mm_struct *dst_mm,
 	 * registered, we firstly wr-protect a none pte which has no page cache
 	 * page backing it, then access the page.
 	 */
-	if (!huge_pte_none_mostly(huge_ptep_get(dst_pte)))
+	if (!huge_pte_none(huge_ptep_get(dst_hpte->ptep)))
 		goto out_release_unlock;
 
 	if (page_in_pagecache) {
@@ -6192,7 +6236,10 @@ int hugetlb_mcopy_atomic_pte(struct mm_struct *dst_mm,
 	else
 		writable = dst_vma->vm_flags & VM_WRITE;
 
-	_dst_pte = make_huge_pte(dst_vma, page, writable);
+	subpage = hugetlb_find_subpage(h, page, dst_addr);
+	BUG_ON(subpage != page && !hugetlb_hgm_enabled(dst_vma));
+
+	_dst_pte = make_huge_pte(dst_vma, subpage, writable);
 	/*
 	 * Always mark UFFDIO_COPY page dirty; note that this may not be
 	 * extremely important for hugetlbfs for now since swapping is not
@@ -6205,12 +6252,12 @@ int hugetlb_mcopy_atomic_pte(struct mm_struct *dst_mm,
 	if (wp_copy)
 		_dst_pte = huge_pte_mkuffd_wp(_dst_pte);
 
-	set_huge_pte_at(dst_mm, dst_addr, dst_pte, _dst_pte);
+	set_huge_pte_at(dst_mm, dst_addr, dst_hpte->ptep, _dst_pte);
 
-	hugetlb_count_add(pages_per_huge_page(h), dst_mm);
+	hugetlb_count_add(hugetlb_pte_size(dst_hpte) / PAGE_SIZE, dst_mm);
 
 	/* No need to invalidate - it was non-present before */
-	update_mmu_cache(dst_vma, dst_addr, dst_pte);
+	update_mmu_cache(dst_vma, dst_addr, dst_hpte->ptep);
 
 	spin_unlock(ptl);
 	if (!is_continue)
@@ -7203,6 +7250,41 @@ static unsigned int __shift_for_hstate(struct hstate *h)
 	for ((tmp_h) = hstate; (shift) = __shift_for_hstate(tmp_h), \
 			       (tmp_h) <= &hstates[hugetlb_max_hstate]; \
 			       (tmp_h)++)
+
+/*
+ * Allocate a HugeTLB PTE that maps as much of [start, end) as possible with a
+ * single page table entry. The allocated HugeTLB PTE is returned in hpte.
+ */
+int hugetlb_alloc_largest_pte(struct hugetlb_pte *hpte, struct mm_struct *mm,
+			      struct vm_area_struct *vma, unsigned long start,
+			      unsigned long end)
+{
+	struct hstate *h = hstate_vma(vma), *tmp_h;
+	unsigned int shift;
+	unsigned long sz;
+	int ret;
+
+	for_each_hgm_shift(h, tmp_h, shift) {
+		sz = 1UL << shift;
+
+		if (!IS_ALIGNED(start, sz) || start + sz > end)
+			continue;
+		goto found;
+	}
+	return -EINVAL;
+found:
+	ret = huge_pte_alloc_high_granularity(hpte, mm, vma, start,
+					      shift, HUGETLB_SPLIT_NONE,
+					      /*write_locked=*/false);
+	if (ret)
+		return ret;
+
+	if (hpte->shift > shift)
+		return -EEXIST;
+
+	BUG_ON(hpte->shift != shift);
+	return 0;
+}
 
 /*
  * Given a particular address, split the HugeTLB PTE that currently maps it
