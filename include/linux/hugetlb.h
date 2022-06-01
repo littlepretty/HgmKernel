@@ -78,6 +78,8 @@ pte_t *hugetlb_alloc_pte(struct mm_struct *mm, struct hugetlb_pte *hpte,
 
 void hugetlb_remove_rmap(struct page *subpage, unsigned long shift,
 			 struct hstate *h, struct vm_area_struct *vma);
+void hugetlb_add_file_rmap(struct page *subpage, unsigned long shift,
+			   struct hstate *h, struct vm_area_struct *vma);
 
 struct hugepage_subpool {
 	spinlock_t lock;
