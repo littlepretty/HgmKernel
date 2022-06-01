@@ -4819,7 +4819,8 @@ int copy_hugetlb_page_range(struct mm_struct *dst, struct mm_struct *src,
 			    struct vm_area_struct *vma)
 {
 	pte_t *src_pte, *dst_pte, entry, dst_entry;
-	struct page *ptepage;
+	struct hugetlb_pte src_hpte, dst_hpte;
+	struct page *ptepage, *hpage;
 	unsigned long addr;
 	bool cow = is_cow_mapping(vma->vm_flags);
 	struct hstate *h = hstate_vma(vma);
@@ -4844,16 +4845,41 @@ int copy_hugetlb_page_range(struct mm_struct *dst, struct mm_struct *src,
 		i_mmap_lock_read(mapping);
 	}
 
-	for (addr = vma->vm_start; addr < vma->vm_end; addr += sz) {
+	addr = vma->vm_start;
+	while (addr < vma->vm_end) {
 		spinlock_t *src_ptl, *dst_ptl;
+		unsigned long hpte_sz;
 		src_pte = huge_pte_offset(src, addr, sz);
-		if (!src_pte)
+		if (!src_pte) {
+			addr += sz;
 			continue;
+		}
 		dst_pte = huge_pte_alloc(dst, vma, addr, sz);
 		if (!dst_pte) {
 			ret = -ENOMEM;
 			break;
 		}
+
+		hugetlb_pte_populate(&src_hpte, src_pte, huge_page_shift(h));
+		hugetlb_pte_populate(&dst_hpte, dst_pte, huge_page_shift(h));
+
+		if (hugetlb_hgm_enabled(vma)) {
+			ret = hugetlb_walk_to(src, &src_hpte, addr,
+					      PAGE_SIZE, /*stop_at_none=*/true);
+			if (ret)
+				break;
+			ret = huge_pte_alloc_high_granularity(
+					&dst_hpte, dst, vma, addr,
+					hugetlb_pte_shift(&src_hpte),
+					SPLIT_NONE, /*write_locked=*/false);
+			if (ret)
+				break;
+
+			src_pte = src_hpte.ptep;
+			dst_pte = dst_hpte.ptep;
+		}
+
+		hpte_sz = hugetlb_pte_size(&src_hpte);
 
 		/*
 		 * If the pagetables are shared don't copy or take references.
@@ -4865,16 +4891,17 @@ int copy_hugetlb_page_range(struct mm_struct *dst, struct mm_struct *src,
 		 * after taking the lock below.
 		 */
 		dst_entry = huge_ptep_get(dst_pte);
-		if ((dst_pte == src_pte) || !huge_pte_none(dst_entry))
+		if ((dst_pte == src_pte) || !hugetlb_pte_none(&dst_hpte))
 			continue;
 
-		dst_ptl = huge_pte_lock(h, dst, dst_pte);
-		src_ptl = huge_pte_lockptr(huge_page_shift(h), src, src_pte);
+		dst_ptl = hugetlb_pte_lock(dst, &dst_hpte);
+		src_ptl = hugetlb_pte_lockptr(src, &src_hpte);
 		spin_lock_nested(src_ptl, SINGLE_DEPTH_NESTING);
 		entry = huge_ptep_get(src_pte);
 		dst_entry = huge_ptep_get(dst_pte);
 again:
-		if (huge_pte_none(entry) || !huge_pte_none(dst_entry)) {
+		if (hugetlb_pte_none(&src_hpte) ||
+		    !hugetlb_pte_none(&dst_hpte)) {
 			/*
 			 * Skip if src entry none.  Also, skip in the
 			 * unlikely case dst entry !none as this implies
@@ -4894,13 +4921,15 @@ again:
 							swp_offset(swp_entry));
 				entry = swp_entry_to_pte(swp_entry);
 				set_huge_swap_pte_at(src, addr, src_pte,
-						     entry, sz);
+						     entry, hpte_sz);
 			}
-			set_huge_swap_pte_at(dst, addr, dst_pte, entry, sz);
+			set_huge_swap_pte_at(dst, addr, dst_pte, entry,
+					     hpte_sz);
 		} else {
 			entry = huge_ptep_get(src_pte);
 			ptepage = pte_page(entry);
-			get_page(ptepage);
+			hpage = compound_head(ptepage);
+			get_page(hpage);
 
 			/*
 			 * This is a rare case where we see pinned hugetlb
@@ -4911,7 +4940,12 @@ again:
 			 * need to be without the pgtable locks since we could
 			 * sleep during the process.
 			 */
-			if (unlikely(page_needs_cow_for_dma(vma, ptepage))) {
+			if (unlikely(page_needs_cow_for_dma(vma, hpage))) {
+				if (hugetlb_hgm_enabled(vma)) {
+					ret = -EINVAL;
+					break;
+				}
+				BUG_ON(!IS_ALIGNED(addr, hugetlb_pte_size(&src_hpte)));
 				pte_t src_pte_old = entry;
 				struct page *new;
 
@@ -4920,13 +4954,13 @@ again:
 				/* Do not use reserve as it's private owned */
 				new = alloc_huge_page(vma, addr, 1);
 				if (IS_ERR(new)) {
-					put_page(ptepage);
+					put_page(hpage);
 					ret = PTR_ERR(new);
 					break;
 				}
-				copy_user_huge_page(new, ptepage, addr, vma,
+				copy_user_huge_page(new, hpage, addr, vma,
 						    npages);
-				put_page(ptepage);
+				put_page(hpage);
 
 				/* Install the new huge page if src pte stable */
 				dst_ptl = huge_pte_lock(h, dst, dst_pte);
@@ -4959,9 +4993,14 @@ again:
 				entry = huge_pte_wrprotect(entry);
 			}
 
-			page_dup_rmap(ptepage, true);
+			// Only dup_rmap once for a page.
+			if (IS_ALIGNED(addr, sz))
+				page_dup_rmap(hpage, true);
+
 			set_huge_pte_at(dst, addr, dst_pte, entry);
-			hugetlb_count_add(npages, dst);
+			hugetlb_count_add(
+					hugetlb_pte_size(&dst_hpte) / PAGE_SIZE,
+					dst);
 		}
 		spin_unlock(src_ptl);
 		spin_unlock(dst_ptl);
