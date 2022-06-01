@@ -7168,6 +7168,73 @@ int hugetlb_alloc_largest_pte(struct hugetlb_pte *hpte, struct mm_struct *mm,
 	return -EINVAL;
 }
 
+int hugetlb_collapse(struct mm_struct *mm, struct vm_area_struct *vma,
+			    unsigned long start, unsigned long end)
+{
+	struct hstate *h = hstate_vma(vma);
+	struct address_space *mapping = vma->vm_file->f_mapping;
+	struct mmu_notifier_range range;
+	struct mmu_gather tlb;
+	struct hstate *tmp_h;
+	unsigned int shift;
+	unsigned curr = start;
+	int ret = 0;
+	struct page *hpage, *subpage;
+	pgoff_t idx;
+	bool writable = vma->vm_flags & VM_WRITE;
+	pte_t entry;
+
+	// PTL must be locked, and mapping lock must be write-locked.
+	i_mmap_assert_write_locked(mapping);
+
+	mmu_notifier_range_init(&range, MMU_NOTIFY_CLEAR, 0, vma, mm,
+				start, end);
+	mmu_notifier_invalidate_range_start(&range);
+	tlb_gather_mmu(&tlb, mm);
+
+	while (curr < end) {
+		for_each_hgm_shift(h, tmp_h, shift) {
+			unsigned long sz = 1UL << shift;
+			struct hugetlb_pte hpte;
+
+			if (!IS_ALIGNED(curr, sz) || curr + sz > end)
+				continue;
+
+			hugetlb_pte_init(&hpte);
+			ret = hugetlb_walk_to(mm, &hpte, curr, sz,
+					      /*stop_at_none=*/false);
+			if (ret)
+				goto out;
+			if (hugetlb_pte_size(&hpte) >= sz)
+				goto hpte_finished;
+
+			idx = vma_hugecache_offset(h, vma, curr);
+			hpage = find_lock_page(mapping, idx);
+			hugetlb_free_range(&tlb, &hpte, curr,
+					   curr + hugetlb_pte_size(&hpte));
+			if (!hpage)
+				goto hpte_finished;
+
+			subpage = calculate_subpage(h, hpage, curr);
+			entry = make_huge_pte_with_shift(vma, subpage,
+							 writable, shift);
+			set_huge_pte_at(mm, curr, hpte.ptep, entry);
+			unlock_page(hpage);
+hpte_finished:
+			curr += hugetlb_pte_size(&hpte);
+			goto next;
+		}
+		ret = -EINVAL;
+		goto out;
+next:
+		continue;
+	}
+out:
+	tlb_finish_mmu(&tlb);
+	mmu_notifier_invalidate_range_end(&range);
+	return ret;
+}
+
 static int hugetlb_split_to_shift(struct mm_struct *mm, struct vm_area_struct *vma,
 			   const struct hugetlb_pte *hpte,
 			   unsigned long addr, unsigned long desired_shift)
