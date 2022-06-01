@@ -7237,6 +7237,94 @@ int hugetlb_alloc_largest_pte(struct hugetlb_pte *hpte, struct mm_struct *mm,
 }
 
 /*
+ * Collapse the address range from @start to @end to be mapped optimally.
+ *
+ * This is only valid for shared mappings. The main use case for this function
+ * is following UFFDIO_CONTINUE. If a user UFFDIO_CONTINUEs an entire hugepage
+ * by calling UFFDIO_CONTINUE once for each 4K region, the kernel doesn't know
+ * to collapse the mapping after the final UFFDIO_CONTINUE. Instead, we leave
+ * it up to userspace to tell us to do so, via MADV_COLLAPSE.
+ *
+ * Any holes in the mapping will be filled. If there is no page in the
+ * pagecache for a region we're collapsing, the PTEs will be cleared.
+ */
+int hugetlb_collapse(struct mm_struct *mm, struct vm_area_struct *vma,
+			    unsigned long start, unsigned long end)
+{
+	struct hstate *h = hstate_vma(vma);
+	struct address_space *mapping = vma->vm_file->f_mapping;
+	struct mmu_notifier_range range;
+	struct mmu_gather tlb;
+	struct hstate *tmp_h;
+	unsigned int shift;
+	unsigned long curr = start;
+	int ret = 0;
+	struct page *hpage, *subpage;
+	pgoff_t idx;
+	bool writable = vma->vm_flags & VM_WRITE;
+	bool shared = vma->vm_flags & VM_SHARED;
+	pte_t entry;
+
+	/*
+	 * This is only supported for shared VMAs, because we need to look up
+	 * the page to use for any PTEs we end up creating.
+	 */
+	if (!shared)
+		return -EINVAL;
+
+	i_mmap_assert_write_locked(mapping);
+
+	mmu_notifier_range_init(&range, MMU_NOTIFY_CLEAR, 0, vma, mm,
+				start, end);
+	mmu_notifier_invalidate_range_start(&range);
+	tlb_gather_mmu(&tlb, mm);
+
+	while (curr < end) {
+		for_each_hgm_shift(h, tmp_h, shift) {
+			unsigned long sz = 1UL << shift;
+			struct hugetlb_pte hpte;
+
+			if (!IS_ALIGNED(curr, sz) || curr + sz > end)
+				continue;
+
+			hugetlb_pte_init(&hpte);
+			ret = hugetlb_walk_to(mm, &hpte, curr, sz,
+					      /*stop_at_none=*/false);
+			if (ret)
+				goto out;
+			if (hugetlb_pte_size(&hpte) >= sz)
+				goto hpte_finished;
+
+			idx = vma_hugecache_offset(h, vma, curr);
+			hpage = find_lock_page(mapping, idx);
+			hugetlb_free_range(&tlb, &hpte, curr,
+					   curr + hugetlb_pte_size(&hpte));
+			if (!hpage) {
+				hugetlb_pte_clear(mm, &hpte, curr);
+				goto hpte_finished;
+			}
+
+			subpage = hugetlb_find_subpage(h, hpage, curr);
+			entry = make_huge_pte_with_shift(vma, subpage,
+							 writable, shift);
+			set_huge_pte_at(mm, curr, hpte.ptep, entry);
+			unlock_page(hpage);
+hpte_finished:
+			curr += hugetlb_pte_size(&hpte);
+			goto next;
+		}
+		ret = -EINVAL;
+		goto out;
+next:
+		continue;
+	}
+out:
+	tlb_finish_mmu(&tlb);
+	mmu_notifier_invalidate_range_end(&range);
+	return ret;
+}
+
+/*
  * Given a particular address, split the HugeTLB PTE that currently maps it
  * so that, for the given address, the PTE that maps it is `desired_shift`.
  * This function will always split the HugeTLB PTE optimally.
