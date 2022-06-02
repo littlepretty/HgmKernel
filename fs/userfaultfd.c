@@ -226,6 +226,11 @@ static inline struct uffd_msg userfault_msg(unsigned long address,
 	return msg;
 }
 
+bool uffd_ctx_has_hgm(struct vm_userfaultfd_ctx *ctx)
+{
+	return ctx->ctx->features & UFFD_FEATURE_MINOR_HUGETLBFS_HGM;
+}
+
 #ifdef CONFIG_HUGETLB_PAGE
 /*
  * Same functionality as userfaultfd_must_wait below with modifications for
@@ -1964,10 +1969,15 @@ static int userfaultfd_api(struct userfaultfd_ctx *ctx,
 		goto err_out;
 	/* report all available features and ioctls to userland */
 	uffdio_api.features = UFFD_API_FEATURES;
+
 #ifndef CONFIG_HAVE_ARCH_USERFAULTFD_MINOR
 	uffdio_api.features &=
 		~(UFFD_FEATURE_MINOR_HUGETLBFS | UFFD_FEATURE_MINOR_SHMEM);
-#endif
+#ifndef CONFIG_HUGETLB_HIGH_GRANULARITY_MAPPING
+	uffdio_api.features &= ~UFFD_FEATURE_MINOR_HUGETLBFS_HGM;
+#endif  /* CONFIG_HUGETLB_HIGH_GRANULARITY_MAPPING */
+#endif  /* CONFIG_HAVE_ARCH_USERFAULTFD_MINOR */
+
 #ifndef CONFIG_HAVE_ARCH_USERFAULTFD_WP
 	uffdio_api.features &= ~UFFD_FEATURE_PAGEFAULT_FLAG_WP;
 #endif
