@@ -1195,6 +1195,13 @@ bool hugetlb_pte_none_mostly(const struct hugetlb_pte *hpte) {
 	return pte_none_mostly(ptep_get(hpte->ptep));
 }
 
+pte_t hugetlb_ptep_get(const struct hugetlb_pte *hpte) {
+	BUG_ON(!hpte->valid);
+	if (hpte->shift > PAGE_SHIFT)
+		return huge_ptep_get(hpte->ptep);
+	return ptep_get(hpte->ptep);
+}
+
 static void enqueue_huge_page(struct hstate *h, struct page *page)
 {
 	int nid = page_to_nid(page);
