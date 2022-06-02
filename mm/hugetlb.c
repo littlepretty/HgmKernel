@@ -1183,6 +1183,25 @@ bool hugetlb_pte_none_mostly(const struct hugetlb_pte *hpte)
 	return pte_none_mostly(ptep_get(hpte->ptep));
 }
 
+pte_t hugetlb_ptep_get(const struct hugetlb_pte *hpte)
+{
+	BUG_ON(!hpte->valid);
+	if (hpte->shift > PAGE_SHIFT)
+		return huge_ptep_get(hpte->ptep);
+	return ptep_get(hpte->ptep);
+}
+
+void hugetlb_pte_clear(struct mm_struct *mm, const struct hugetlb_pte *hpte,
+		       unsigned long address)
+{
+	BUG_ON(!hpte->valid);
+	unsigned long sz = hugetlb_pte_size(hpte);
+
+	if (sz > PAGE_SIZE)
+		return huge_pte_clear(mm, address, hpte->ptep, sz);
+	return pte_clear(mm, address, hpte->ptep);
+}
+
 static void enqueue_huge_page(struct hstate *h, struct page *page)
 {
 	int nid = page_to_nid(page);
