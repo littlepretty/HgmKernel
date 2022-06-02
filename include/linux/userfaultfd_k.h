@@ -162,6 +162,8 @@ static inline bool vma_can_userfault(struct vm_area_struct *vma,
 	    vma_is_shmem(vma);
 }
 
+extern bool uffd_ctx_has_hgm(struct vm_userfaultfd_ctx *);
+
 extern int dup_userfaultfd(struct vm_area_struct *, struct list_head *);
 extern void dup_userfaultfd_complete(struct list_head *);
 
@@ -224,6 +226,11 @@ static inline bool userfaultfd_huge_pmd_wp(struct vm_area_struct *vma,
 
 
 static inline bool userfaultfd_armed(struct vm_area_struct *vma)
+{
+	return false;
+}
+
+static inline bool uffd_ctx_has_hgm(struct vm_userfaultfd_ctx *ctx)
 {
 	return false;
 }
