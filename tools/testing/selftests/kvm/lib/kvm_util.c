@@ -993,7 +993,7 @@ void vm_userspace_mem_region_add(struct kvm_vm *vm,
 	region->fd = -1;
 	if (backing_src_is_shared(src_type))
 		region->fd = kvm_memfd_alloc(region->mmap_size,
-					     src_type == VM_MEM_SRC_SHARED_HUGETLB);
+				is_backing_src_shared_hugetlb(src_type));
 
 	region->mmap_start = mmap(NULL, region->mmap_size,
 				  PROT_READ | PROT_WRITE,
