@@ -76,6 +76,12 @@ static int handle_uffd_page_request(int uffd_mode, int uffd, uint64_t addr)
 
 	clock_gettime(CLOCK_MONOTONIC, &start);
 
+	/*
+	 * We're using UFFD_FEATURE_EXACT_ADDRESS, so round down the address.
+	 * This is needed to support HugeTLB high-granularity mapping.
+	 */
+	addr &= ~(demand_paging_size - 1);
+
 	if (uffd_mode == UFFDIO_REGISTER_MODE_MISSING) {
 		struct uffdio_copy copy;
 
@@ -244,7 +250,8 @@ static void setup_demand_paging(struct kvm_vm *vm,
 	TEST_ASSERT(uffd >= 0, __KVM_SYSCALL_ERROR("userfaultfd()", uffd));
 
 	uffdio_api.api = UFFD_API;
-	uffdio_api.features = 0;
+	uffdio_api.features = UFFD_FEATURE_EXACT_ADDRESS |
+		UFFD_FEATURE_MINOR_HUGETLBFS_HGM;
 	ret = ioctl(uffd, UFFDIO_API, &uffdio_api);
 	TEST_ASSERT(ret != -1, __KVM_SYSCALL_ERROR("UFFDIO_API", ret));
 

@@ -254,6 +254,13 @@ const struct vm_mem_backing_src_alias *vm_mem_backing_src_alias(uint32_t i)
 			 */
 			.flag = MAP_SHARED,
 		},
+		[VM_MEM_SRC_SHARED_HUGETLB_HGM] = {
+			/*
+			 * Identical to shared_hugetlb except for the name.
+			 */
+			.name = "shared_hugetlb_hgm",
+			.flag = MAP_SHARED,
+		},
 	};
 	_Static_assert(ARRAY_SIZE(aliases) == NUM_SRC_TYPES,
 		       "Missing new backing src types?");
@@ -272,6 +279,7 @@ size_t get_backing_src_pagesz(uint32_t i)
 	switch (i) {
 	case VM_MEM_SRC_ANONYMOUS:
 	case VM_MEM_SRC_SHMEM:
+	case VM_MEM_SRC_SHARED_HUGETLB_HGM:
 		return getpagesize();
 	case VM_MEM_SRC_ANONYMOUS_THP:
 		return get_trans_hugepagesz();
@@ -286,6 +294,12 @@ size_t get_backing_src_pagesz(uint32_t i)
 bool is_backing_src_hugetlb(uint32_t i)
 {
 	return !!(vm_mem_backing_src_alias(i)->flag & MAP_HUGETLB);
+}
+
+bool is_backing_src_shared_hugetlb(enum vm_mem_backing_src_type src_type)
+{
+	return src_type == VM_MEM_SRC_SHARED_HUGETLB ||
+		src_type == VM_MEM_SRC_SHARED_HUGETLB_HGM;
 }
 
 static void print_available_backing_src_types(const char *prefix)
