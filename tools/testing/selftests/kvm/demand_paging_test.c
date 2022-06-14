@@ -170,7 +170,7 @@ static void run_test(enum vm_guest_mode mode, void *arg)
 			uffd_descs[i] = uffd_setup_demand_paging(
 				p->uffd_mode, p->uffd_delay, vcpu_hva,
 				vcpu_args->pages * memstress_args.guest_page_size,
-				&handle_uffd_page_request);
+				p->src_type, &handle_uffd_page_request);
 		}
 	}
 
