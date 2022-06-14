@@ -26,9 +26,9 @@ struct uffd_desc {
 	pthread_t thread;
 };
 
-struct uffd_desc *uffd_setup_demand_paging(int uffd_mode, useconds_t delay,
-					   void *hva, uint64_t len,
-					   uffd_handler_t handler);
+struct uffd_desc *uffd_setup_demand_paging(
+		int uffd_mode, useconds_t delay, void *hva, uint64_t len,
+		enum vm_mem_backing_src_type src_type, uffd_handler_t handler);
 
 void uffd_stop_demand_paging(struct uffd_desc *uffd);
 
