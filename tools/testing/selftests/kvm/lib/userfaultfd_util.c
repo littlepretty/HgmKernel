@@ -25,6 +25,10 @@
 
 #ifdef __NR_userfaultfd
 
+#ifndef MADV_SPLIT
+#define MADV_SPLIT 26
+#endif
+
 static void *uffd_handler_thread_fn(void *arg)
 {
 	struct uffd_desc *uffd_desc = (struct uffd_desc *)arg;
@@ -108,9 +112,9 @@ static void *uffd_handler_thread_fn(void *arg)
 	return NULL;
 }
 
-struct uffd_desc *uffd_setup_demand_paging(int uffd_mode, useconds_t delay,
-					   void *hva, uint64_t len,
-					   uffd_handler_t handler)
+struct uffd_desc *uffd_setup_demand_paging(
+		int uffd_mode, useconds_t delay, void *hva, uint64_t len,
+		enum vm_mem_backing_src_type src_type, uffd_handler_t handler)
 {
 	struct uffd_desc *uffd_desc;
 	bool is_minor = (uffd_mode == UFFDIO_REGISTER_MODE_MINOR);
@@ -139,6 +143,10 @@ struct uffd_desc *uffd_setup_demand_paging(int uffd_mode, useconds_t delay,
 	TEST_ASSERT(ioctl(uffd, UFFDIO_API, &uffdio_api) != -1,
 		    "ioctl UFFDIO_API failed: %" PRIu64,
 		    (uint64_t)uffdio_api.api);
+
+	if (src_type == VM_MEM_SRC_SHARED_HUGETLB_HGM)
+		TEST_ASSERT(!madvise(hva, len, MADV_SPLIT),
+				"Could not enable HGM");
 
 	uffdio_register.range.start = (uint64_t)hva;
 	uffdio_register.range.len = len;
