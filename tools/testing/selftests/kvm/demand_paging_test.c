@@ -76,6 +76,12 @@ static int handle_uffd_page_request(int uffd_mode, int uffd, uint64_t addr)
 
 	clock_gettime(CLOCK_MONOTONIC, &start);
 
+	/*
+	 * We're using UFFD_FEATURE_EXACT_ADDRESS, so round down the address.
+	 * This is needed to support HugeTLB high-granularity mapping.
+	 */
+	addr &= ~(demand_paging_size - 1);
+
 	if (uffd_mode == UFFDIO_REGISTER_MODE_MISSING) {
 		struct uffdio_copy copy;
 
@@ -214,7 +220,8 @@ static void setup_demand_paging(struct kvm_vm *vm,
 				pthread_t *uffd_handler_thread, int pipefd,
 				int uffd_mode, useconds_t uffd_delay,
 				struct uffd_handler_args *uffd_args,
-				void *hva, void *alias, uint64_t len)
+				void *hva, void *alias, uint64_t len,
+				enum vm_mem_backing_src_type src_type)
 {
 	bool is_minor = (uffd_mode == UFFDIO_REGISTER_MODE_MINOR);
 	int uffd;
@@ -244,9 +251,15 @@ static void setup_demand_paging(struct kvm_vm *vm,
 	TEST_ASSERT(uffd >= 0, __KVM_SYSCALL_ERROR("userfaultfd()", uffd));
 
 	uffdio_api.api = UFFD_API;
-	uffdio_api.features = 0;
+	uffdio_api.features = is_minor
+		? UFFD_FEATURE_EXACT_ADDRESS | UFFD_FEATURE_MINOR_HUGETLBFS_HGM
+		: 0;
 	ret = ioctl(uffd, UFFDIO_API, &uffdio_api);
 	TEST_ASSERT(ret != -1, __KVM_SYSCALL_ERROR("UFFDIO_API", ret));
+	if (src_type == VM_MEM_SRC_SHARED_HUGETLB_HGM)
+		TEST_ASSERT(uffdio_api.features &
+			    UFFD_FEATURE_MINOR_HUGETLBFS_HGM,
+			    "UFFD_FEATURE_MINOR_HUGETLBFS_HGM not present");
 
 	uffdio_register.range.start = (uint64_t)hva;
 	uffdio_register.range.len = len;
@@ -329,7 +342,8 @@ static void run_test(enum vm_guest_mode mode, void *arg)
 					    pipefds[i * 2], p->uffd_mode,
 					    p->uffd_delay, &uffd_args[i],
 					    vcpu_hva, vcpu_alias,
-					    vcpu_args->pages * perf_test_args.guest_page_size);
+					    vcpu_args->pages * perf_test_args.guest_page_size,
+					    p->src_type);
 		}
 	}
 
