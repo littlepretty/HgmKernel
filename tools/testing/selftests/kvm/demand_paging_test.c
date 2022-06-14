@@ -68,6 +68,12 @@ static int handle_uffd_page_request(int uffd_mode, int uffd,
 
 	clock_gettime(CLOCK_MONOTONIC, &start);
 
+	/*
+	 * We're using UFFD_FEATURE_EXACT_ADDRESS, so round down the address.
+	 * This is needed to support HugeTLB high-granularity mapping.
+	 */
+	addr &= ~(demand_paging_size - 1);
+
 	if (uffd_mode == UFFDIO_REGISTER_MODE_MISSING) {
 		struct uffdio_copy copy;
 
@@ -170,7 +176,7 @@ static void run_test(enum vm_guest_mode mode, void *arg)
 			uffd_descs[i] = uffd_setup_demand_paging(
 				p->uffd_mode, p->uffd_delay, vcpu_hva,
 				vcpu_args->pages * memstress_args.guest_page_size,
-				&handle_uffd_page_request);
+				p->src_type, &handle_uffd_page_request);
 		}
 	}
 
