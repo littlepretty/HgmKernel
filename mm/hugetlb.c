@@ -6983,6 +6983,14 @@ pte_t *huge_pte_offset(struct mm_struct *mm,
 
 #endif /* CONFIG_ARCH_WANT_GENERAL_HUGETLB */
 
+#ifdef CONFIG_HUGETLB_HIGH_GRANULARITY_MAPPING
+bool hugetlb_hgm_enabled(struct vm_area_struct *vma)
+{
+	/* All shared VMAs have HGM enabled. */
+	return vma->vm_flags & VM_SHARED;
+}
+#endif /* CONFIG_HUGETLB_HIGH_GRANULARITY_MAPPING */
+
 /*
  * These functions are overwritable if your architecture needs its own
  * behavior.
