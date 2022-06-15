@@ -64,7 +64,7 @@
 
 #ifdef __NR_userfaultfd
 
-static unsigned long nr_cpus, nr_pages, nr_pages_per_cpu, page_size;
+static unsigned long nr_cpus, nr_pages, nr_pages_per_cpu, page_size, hpage_size;
 
 #define BOUNCE_RANDOM		(1<<0)
 #define BOUNCE_RACINGFAULTS	(1<<1)
@@ -72,9 +72,10 @@ static unsigned long nr_cpus, nr_pages, nr_pages_per_cpu, page_size;
 #define BOUNCE_POLL		(1<<3)
 static int bounces;
 
-#define TEST_ANON	1
-#define TEST_HUGETLB	2
-#define TEST_SHMEM	3
+#define TEST_ANON		1
+#define TEST_HUGETLB		2
+#define TEST_HUGETLB_HGM	3
+#define TEST_SHMEM		4
 static int test_type;
 
 /* exercise the test_uffdio_*_eexist every ALARM_INTERVAL_SECS */
@@ -85,6 +86,7 @@ static volatile bool test_uffdio_zeropage_eexist = true;
 static bool test_uffdio_wp = true;
 /* Whether to test uffd minor faults */
 static bool test_uffdio_minor = false;
+static bool test_uffdio_copy = true;
 
 static bool map_shared;
 static int shm_fd;
@@ -140,10 +142,15 @@ static void usage(void)
 	fprintf(stderr, "\nUsage: ./userfaultfd <test type> <MiB> <bounces> "
 		"[hugetlbfs_file]\n\n");
 	fprintf(stderr, "Supported <test type>: anon, hugetlb, "
-		"hugetlb_shared, shmem\n\n");
+		"hugetlb_shared, hugetlb_shared_hgm, shmem\n\n");
 	fprintf(stderr, "Examples:\n\n");
 	fprintf(stderr, "%s", examples);
 	exit(1);
+}
+
+static bool test_is_hugetlb(void)
+{
+	return test_type == TEST_HUGETLB || test_type == TEST_HUGETLB_HGM;
 }
 
 #define _err(fmt, ...)						\
@@ -348,7 +355,7 @@ static struct uffd_test_ops *uffd_test_ops;
 
 static inline uint64_t uffd_minor_feature(void)
 {
-	if (test_type == TEST_HUGETLB && map_shared)
+	if (test_is_hugetlb() && map_shared)
 		return UFFD_FEATURE_MINOR_HUGETLBFS;
 	else if (test_type == TEST_SHMEM)
 		return UFFD_FEATURE_MINOR_SHMEM;
@@ -360,7 +367,7 @@ static uint64_t get_expected_ioctls(uint64_t mode)
 {
 	uint64_t ioctls = UFFD_API_RANGE_IOCTLS;
 
-	if (test_type == TEST_HUGETLB)
+	if (test_is_hugetlb())
 		ioctls &= ~(1 << _UFFDIO_ZEROPAGE);
 
 	if (!((mode & UFFDIO_REGISTER_MODE_WP) && test_uffdio_wp))
@@ -1116,6 +1123,12 @@ static int userfaultfd_events_test(void)
 	char c;
 	struct uffd_stats stats = { 0 };
 
+	if (!test_uffdio_copy) {
+		printf("Skipping userfaultfd events test "
+			"(test_uffdio_copy=false)\n");
+		return 0;
+	}
+
 	printf("testing events (fork, remap, remove): ");
 	fflush(stdout);
 
@@ -1168,6 +1181,12 @@ static int userfaultfd_sig_test(void)
 	pid_t pid;
 	char c;
 	struct uffd_stats stats = { 0 };
+
+	if (!test_uffdio_copy) {
+		printf("Skipping userfaultfd signal test "
+			"(test_uffdio_copy=false)\n");
+		return 0;
+	}
 
 	printf("testing signal delivery: ");
 	fflush(stdout);
@@ -1438,6 +1457,12 @@ static int userfaultfd_stress(void)
 	pthread_attr_init(&attr);
 	pthread_attr_setstacksize(&attr, 16*1024*1024);
 
+	if (!test_uffdio_copy) {
+		printf("Skipping userfaultfd stress test "
+			"(test_uffdio_copy=false)\n");
+		bounces = 0;
+	}
+
 	while (bounces--) {
 		printf("bounces: %d, mode:", bounces);
 		if (bounces & BOUNCE_RANDOM)
@@ -1598,6 +1623,13 @@ static void set_test_type(const char *type)
 		uffd_test_ops = &hugetlb_uffd_test_ops;
 		/* Minor faults require shared hugetlb; only enable here. */
 		test_uffdio_minor = true;
+	} else if (!strcmp(type, "hugetlb_shared_hgm")) {
+		map_shared = true;
+		test_type = TEST_HUGETLB_HGM;
+		uffd_test_ops = &hugetlb_uffd_test_ops;
+		/* Minor faults require shared hugetlb; only enable here. */
+		test_uffdio_minor = true;
+		test_uffdio_copy = false;
 	} else if (!strcmp(type, "shmem")) {
 		map_shared = true;
 		test_type = TEST_SHMEM;
@@ -1607,8 +1639,10 @@ static void set_test_type(const char *type)
 		err("Unknown test type: %s", type);
 	}
 
+	hpage_size = default_huge_page_size();
 	if (test_type == TEST_HUGETLB)
-		page_size = default_huge_page_size();
+		// TEST_HUGETLB_HGM gets small pages.
+		page_size = hpage_size;
 	else
 		page_size = sysconf(_SC_PAGE_SIZE);
 
@@ -1658,19 +1692,26 @@ int main(int argc, char **argv)
 	nr_cpus = sysconf(_SC_NPROCESSORS_ONLN);
 	nr_pages_per_cpu = atol(argv[2]) * 1024*1024 / page_size /
 		nr_cpus;
+	if (test_type == TEST_HUGETLB_HGM)
+		/*
+		 * `page_size` refers to the page_size we can use in
+		 * UFFDIO_CONTINUE. We still need nr_pages to be appropriately
+		 * aligned, so align it here.
+		 */
+		nr_pages_per_cpu -= nr_pages_per_cpu % (hpage_size / page_size);
 	if (!nr_pages_per_cpu) {
 		_err("invalid MiB");
 		usage();
 	}
+	nr_pages = nr_pages_per_cpu * nr_cpus;
 
 	bounces = atoi(argv[3]);
 	if (bounces <= 0) {
 		_err("invalid bounces");
 		usage();
 	}
-	nr_pages = nr_pages_per_cpu * nr_cpus;
 
-	if (test_type == TEST_HUGETLB && map_shared) {
+	if (test_is_hugetlb() && map_shared) {
 		if (argc < 5)
 			usage();
 		huge_fd = open(argv[4], O_CREAT | O_RDWR, 0755);
