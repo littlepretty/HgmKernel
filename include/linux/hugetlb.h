@@ -111,6 +111,9 @@ struct hugetlb_vma_lock {
 
 struct hugetlb_shared_vma_data {
 	struct hugetlb_vma_lock vma_lock;
+#ifdef CONFIG_HUGETLB_HIGH_GRANULARITY_MAPPING
+	bool hgm_enabled;
+#endif
 };
 
 extern struct resv_map *resv_map_alloc(void);
@@ -1210,6 +1213,25 @@ static inline void hugetlb_unregister_node(struct node *node)
 {
 }
 #endif	/* CONFIG_HUGETLB_PAGE */
+
+#ifdef CONFIG_HUGETLB_HIGH_GRANULARITY_MAPPING
+bool hugetlb_hgm_enabled(struct vm_area_struct *vma);
+bool hugetlb_hgm_eligible(struct vm_area_struct *vma);
+int enable_hugetlb_hgm(struct vm_area_struct *vma);
+#else
+static inline bool hugetlb_hgm_enabled(struct vm_area_struct *vma)
+{
+	return false;
+}
+static inline bool hugetlb_hgm_eligible(struct vm_area_struct *vma)
+{
+	return false;
+}
+static inline int enable_hugetlb_hgm(struct vm_area_struct *vma)
+{
+	return -EINVAL;
+}
+#endif
 
 static inline spinlock_t *huge_pte_lock(struct hstate *h,
 					struct mm_struct *mm, pte_t *pte)

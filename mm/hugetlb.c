@@ -6818,6 +6818,10 @@ static bool pmd_sharing_possible(struct vm_area_struct *vma)
 	if (uffd_disable_huge_pmd_share(vma))
 		return false;
 #endif
+#ifdef CONFIG_HUGETLB_HIGH_GRANULARITY_MAPPING
+	if (hugetlb_hgm_enabled(vma))
+		return false;
+#endif
 	/*
 	 * Only shared VMAs can share PMDs.
 	 */
@@ -7004,6 +7008,9 @@ static int hugetlb_vma_data_alloc(struct vm_area_struct *vma)
 	kref_init(&data->vma_lock.refs);
 	init_rwsem(&data->vma_lock.rw_sema);
 	data->vma_lock.vma = vma;
+#ifdef CONFIG_HUGETLB_HIGH_GRANULARITY_MAPPING
+	data->hgm_enabled = false;
+#endif
 	vma->vm_private_data = data;
 	return 0;
 }
@@ -7260,6 +7267,68 @@ __weak unsigned long hugetlb_mask_last_page(struct hstate *h)
 }
 
 #endif /* CONFIG_ARCH_WANT_GENERAL_HUGETLB */
+
+#ifdef CONFIG_HUGETLB_HIGH_GRANULARITY_MAPPING
+bool hugetlb_hgm_eligible(struct vm_area_struct *vma)
+{
+	/*
+	 * All shared VMAs may have HGM.
+	 *
+	 * HGM requires using the VMA lock, which only exists for shared VMAs.
+	 * To make HGM work for private VMAs, we would need to use another
+	 * scheme to prevent collapsing/splitting from invalidating other
+	 * threads' page table walks.
+	 */
+	return vma && (vma->vm_flags & VM_MAYSHARE);
+}
+bool hugetlb_hgm_enabled(struct vm_area_struct *vma)
+{
+	struct hugetlb_shared_vma_data *data = vma->vm_private_data;
+
+	if (!vma || !(vma->vm_flags & VM_MAYSHARE))
+		return false;
+
+	return data && data->hgm_enabled;
+}
+
+/*
+ * Enable high-granularity mapping (HGM) for this VMA. Once enabled, HGM
+ * cannot be turned off.
+ *
+ * PMDs cannot be shared in HGM VMAs.
+ */
+int enable_hugetlb_hgm(struct vm_area_struct *vma)
+{
+	int ret;
+	struct hugetlb_shared_vma_data *data;
+
+	if (!hugetlb_hgm_eligible(vma))
+		return -EINVAL;
+
+	if (hugetlb_hgm_enabled(vma))
+		return 0;
+
+	/*
+	 * We must hold the mmap lock for writing so that callers can rely on
+	 * hugetlb_hgm_enabled returning a consistent result while holding
+	 * the mmap lock for reading.
+	 */
+	mmap_assert_write_locked(vma->vm_mm);
+
+	/* HugeTLB HGM requires the VMA lock to synchronize collapsing. */
+	ret = hugetlb_vma_data_alloc(vma);
+	if (ret)
+		return ret;
+
+	data = vma->vm_private_data;
+	BUG_ON(!data);
+	data->hgm_enabled = true;
+
+	/* We don't support PMD sharing with HGM. */
+	hugetlb_unshare_all_pmds(vma);
+	return 0;
+}
+#endif /* CONFIG_HUGETLB_HIGH_GRANULARITY_MAPPING */
 
 /*
  * These functions are overwritable if your architecture needs its own
