@@ -6824,6 +6824,10 @@ static bool pmd_sharing_possible(struct vm_area_struct *vma)
 	if (uffd_disable_huge_pmd_share(vma))
 		return false;
 #endif
+#ifdef CONFIG_HUGETLB_HIGH_GRANULARITY_MAPPING
+	if (hugetlb_hgm_enabled(vma))
+		return false;
+#endif
 	/*
 	 * Only shared VMAs can share PMDs.
 	 */
@@ -7265,6 +7269,67 @@ __weak unsigned long hugetlb_mask_last_page(struct hstate *h)
 }
 
 #endif /* CONFIG_ARCH_WANT_GENERAL_HUGETLB */
+
+#ifdef CONFIG_HUGETLB_HIGH_GRANULARITY_MAPPING
+bool hugetlb_hgm_eligible(struct vm_area_struct *vma)
+{
+	/*
+	 * All shared VMAs may have HGM.
+	 *
+	 * HGM requires using the VMA lock, which only exists for shared VMAs.
+	 * To make HGM work for private VMAs, we would need to use another
+	 * scheme to prevent collapsing/splitting from invalidating other
+	 * threads' page table walks.
+	 */
+	return vma && (vma->vm_flags & VM_MAYSHARE);
+}
+bool hugetlb_hgm_enabled(struct vm_area_struct *vma)
+{
+	return vma && (vma->vm_flags & VM_HUGETLB_HGM);
+}
+
+/*
+ * Enable high-granularity mapping (HGM) for this VMA. Once enabled, HGM
+ * cannot be turned off.
+ *
+ * PMDs cannot be shared in HGM VMAs.
+ */
+int enable_hugetlb_hgm(struct vm_area_struct *vma)
+{
+	int ret;
+
+	if (!hugetlb_hgm_eligible(vma))
+		return -EINVAL;
+
+	if (hugetlb_hgm_enabled(vma))
+		return 0;
+
+	/*
+	 * We must hold the mmap lock for writing so that callers can rely on
+	 * hugetlb_hgm_enabled returning a consistent result while holding
+	 * the mmap lock for reading.
+	 */
+	mmap_assert_write_locked(vma->vm_mm);
+
+	/*
+	 * HugeTLB HGM requires the VMA lock to synchronize collapsing, just
+	 * like PMD unsharing for non-HGM VMAs.
+	 *
+	 * It's possible for the VMA lock to be lost due to a VMA split. If
+	 * this happens, collapsing the page tables mappings later cannot
+	 * be done safely.
+	 */
+	ret = hugetlb_vma_lock_alloc(vma);
+	if (ret)
+		return ret;
+
+	/* We don't support PMD sharing with HGM. */
+	hugetlb_unshare_all_pmds(vma);
+
+	vma->vm_flags |= VM_HUGETLB_HGM;
+	return 0;
+}
+#endif /* CONFIG_HUGETLB_HIGH_GRANULARITY_MAPPING */
 
 /*
  * These functions are overwritable if your architecture needs its own
