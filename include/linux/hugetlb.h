@@ -1183,6 +1183,25 @@ static inline void set_huge_pte_at(struct mm_struct *mm, unsigned long addr,
 }
 #endif	/* CONFIG_HUGETLB_PAGE */
 
+#ifdef CONFIG_HUGETLB_HIGH_GRANULARITY_MAPPING
+bool hugetlb_hgm_enabled(struct vm_area_struct *vma);
+bool hugetlb_hgm_eligible(struct vm_area_struct *vma);
+int enable_hugetlb_hgm(struct vm_area_struct *vma);
+#else
+static inline bool hugetlb_hgm_enabled(struct vm_area_struct *vma)
+{
+	return false;
+}
+static inline bool hugetlb_hgm_eligible(struct vm_area_struct *vma)
+{
+	return false;
+}
+static inline int enable_hugetlb_hgm(struct vm_area_struct *vma)
+{
+	return -EINVAL;
+}
+#endif
+
 /* These will be removed in a future patch. */
 static inline spinlock_t *huge_pte_lock(struct hstate *h,
 					struct mm_struct *mm, pte_t *pte)
