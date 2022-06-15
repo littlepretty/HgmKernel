@@ -7248,6 +7248,27 @@ __weak unsigned long hugetlb_mask_last_page(struct hstate *h)
 
 #endif /* CONFIG_ARCH_WANT_GENERAL_HUGETLB */
 
+#ifdef CONFIG_HUGETLB_HIGH_GRANULARITY_MAPPING
+bool hugetlb_hgm_eligible(struct vm_area_struct *vma)
+{
+	/* All shared VMAs may have HGM. */
+	return vma->vm_flags & VM_SHARED;
+}
+bool hugetlb_hgm_enabled(struct vm_area_struct *vma)
+{
+	return false;
+}
+int enable_hugetlb_hgm(struct vm_area_struct *vma)
+{
+	if (hugetlb_hgm_enabled(vma))
+		return 0;
+
+	// TODO: grab mapping lock for writing, unshare all PMDs.
+	// 	check if VMA is actually eligible for HGM.
+	return -EINVAL;
+}
+#endif /* CONFIG_HUGETLB_HIGH_GRANULARITY_MAPPING */
+
 /*
  * These functions are overwritable if your architecture needs its own
  * behavior.
