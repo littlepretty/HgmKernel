@@ -6298,14 +6298,18 @@ long follow_hugetlb_page(struct mm_struct *mm, struct vm_area_struct *vma,
 	unsigned long vaddr = *position;
 	unsigned long remainder = *nr_pages;
 	struct hstate *h = hstate_vma(vma);
+	struct address_space *mapping = vma->vm_file->f_mapping;
 	int err = -EFAULT, refs;
+	bool has_i_mmap_sem = false;
 
 	while (vaddr < vma->vm_end && remainder) {
 		pte_t *pte;
 		spinlock_t *ptl = NULL;
 		bool unshare = false;
 		int absent;
+		unsigned long pages_per_hpte;
 		struct page *page;
+		struct hugetlb_pte hpte;
 
 		/*
 		 * If we have a pending SIGKILL, don't keep faulting pages and
@@ -6325,9 +6329,23 @@ long follow_hugetlb_page(struct mm_struct *mm, struct vm_area_struct *vma,
 		 */
 		pte = huge_pte_offset(mm, vaddr & huge_page_mask(h),
 				      huge_page_size(h));
-		if (pte)
-			ptl = huge_pte_lock(h, mm, pte);
-		absent = !pte || huge_pte_none(huge_ptep_get(pte));
+		if (pte) {
+			hugetlb_pte_populate(&hpte, pte, huge_page_shift(h));
+			if (hugetlb_hgm_enabled(vma)) {
+				BUG_ON(has_i_mmap_sem);
+				i_mmap_lock_read(mapping);
+				/*
+				 * Need to hold the mapping semaphore for
+				 * reading to do a HGM walk.
+				 */
+				has_i_mmap_sem = true;
+				hugetlb_walk_to(mm, &hpte, vaddr, PAGE_SIZE,
+						/*stop_at_none=*/true);
+			}
+			ptl = hugetlb_pte_lock(mm, &hpte);
+		}
+
+		absent = !pte || hugetlb_pte_none(&hpte);
 
 		/*
 		 * When coredumping, it suits get_dump_page if we just return
@@ -6338,8 +6356,13 @@ long follow_hugetlb_page(struct mm_struct *mm, struct vm_area_struct *vma,
 		 */
 		if (absent && (flags & FOLL_DUMP) &&
 		    !hugetlbfs_pagecache_present(h, vma, vaddr)) {
-			if (pte)
+			if (pte) {
+				if (has_i_mmap_sem) {
+					i_mmap_unlock_read(mapping);
+					has_i_mmap_sem = false;
+				}
 				spin_unlock(ptl);
+			}
 			remainder = 0;
 			break;
 		}
@@ -6359,8 +6382,13 @@ long follow_hugetlb_page(struct mm_struct *mm, struct vm_area_struct *vma,
 			vm_fault_t ret;
 			unsigned int fault_flags = 0;
 
-			if (pte)
+			if (pte) {
+				if (has_i_mmap_sem) {
+					i_mmap_unlock_read(mapping);
+					has_i_mmap_sem = false;
+				}
 				spin_unlock(ptl);
+			}
 			if (flags & FOLL_WRITE)
 				fault_flags |= FAULT_FLAG_WRITE;
 			else if (unshare)
@@ -6403,8 +6431,11 @@ long follow_hugetlb_page(struct mm_struct *mm, struct vm_area_struct *vma,
 			continue;
 		}
 
-		pfn_offset = (vaddr & ~huge_page_mask(h)) >> PAGE_SHIFT;
-		page = pte_page(huge_ptep_get(pte));
+		pfn_offset = (vaddr & ~hugetlb_pte_mask(&hpte)) >> PAGE_SHIFT;
+		page = pte_page(hugetlb_ptep_get(&hpte));
+		pages_per_hpte = hugetlb_pte_size(&hpte) / PAGE_SIZE;
+		if (hugetlb_hgm_enabled(vma))
+			page = compound_head(page);
 
 		VM_BUG_ON_PAGE((flags & FOLL_PIN) && PageAnon(page) &&
 			       !PageAnonExclusive(page), page);
@@ -6414,17 +6445,21 @@ long follow_hugetlb_page(struct mm_struct *mm, struct vm_area_struct *vma,
 		 * and skip the same_page loop below.
 		 */
 		if (!pages && !vmas && !pfn_offset &&
-		    (vaddr + huge_page_size(h) < vma->vm_end) &&
-		    (remainder >= pages_per_huge_page(h))) {
-			vaddr += huge_page_size(h);
-			remainder -= pages_per_huge_page(h);
-			i += pages_per_huge_page(h);
+		    (vaddr + pages_per_hpte < vma->vm_end) &&
+		    (remainder >= pages_per_hpte)) {
+			vaddr += pages_per_hpte;
+			remainder -= pages_per_hpte;
+			i += pages_per_hpte;
 			spin_unlock(ptl);
+			if (has_i_mmap_sem) {
+				has_i_mmap_sem = false;
+				i_mmap_unlock_read(mapping);
+			}
 			continue;
 		}
 
 		/* vaddr may not be aligned to PAGE_SIZE */
-		refs = min3(pages_per_huge_page(h) - pfn_offset, remainder,
+		refs = min3(pages_per_hpte - pfn_offset, remainder,
 		    (vma->vm_end - ALIGN_DOWN(vaddr, PAGE_SIZE)) >> PAGE_SHIFT);
 
 		if (pages || vmas)
@@ -6447,6 +6482,10 @@ long follow_hugetlb_page(struct mm_struct *mm, struct vm_area_struct *vma,
 			if (WARN_ON_ONCE(!try_grab_folio(pages[i], refs,
 							 flags))) {
 				spin_unlock(ptl);
+				if (has_i_mmap_sem) {
+					has_i_mmap_sem = false;
+					i_mmap_unlock_read(mapping);
+				}
 				remainder = 0;
 				err = -ENOMEM;
 				break;
@@ -6458,8 +6497,13 @@ long follow_hugetlb_page(struct mm_struct *mm, struct vm_area_struct *vma,
 		i += refs;
 
 		spin_unlock(ptl);
+		if (has_i_mmap_sem) {
+			has_i_mmap_sem = false;
+			i_mmap_unlock_read(mapping);
+		}
 	}
 	*nr_pages = remainder;
+	BUG_ON(has_i_mmap_sem);
 	/*
 	 * setting position is actually required only if remainder is
 	 * not zero but it's faster not to add a "if (remainder)"
