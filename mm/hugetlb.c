@@ -6370,11 +6370,9 @@ static void record_subpages_vmas(struct page *page, struct vm_area_struct *vma,
 }
 
 static inline bool __follow_hugetlb_must_fault(struct vm_area_struct *vma,
-					       unsigned int flags, pte_t *pte,
+					       unsigned int flags, pte_t pteval,
 					       bool *unshare)
 {
-	pte_t pteval = huge_ptep_get(pte);
-
 	*unshare = false;
 	if (is_swap_pte(pteval))
 		return true;
@@ -6448,12 +6446,26 @@ long follow_hugetlb_page(struct mm_struct *mm, struct vm_area_struct *vma,
 	struct hstate *h = hstate_vma(vma);
 	int err = -EFAULT, refs;
 
+	/*
+	 * Grab the VMA lock for reading now so no one can collapse the page
+	 * table from under us.
+	 */
+	if (hugetlb_hgm_enabled(vma)) {
+		if (flags & FOLL_NOWAIT) {
+			*nr_pages = 0;
+			return 0;
+		}
+		hugetlb_vma_lock_read(vma);
+	}
+
 	while (vaddr < vma->vm_end && remainder) {
-		pte_t *pte;
+		pte_t *ptep, pte;
 		spinlock_t *ptl = NULL;
 		bool unshare = false;
 		int absent;
-		struct page *page;
+		unsigned long pages_per_hpte;
+		struct page *page, *subpage;
+		struct hugetlb_pte hpte;
 
 		/*
 		 * If we have a pending SIGKILL, don't keep faulting pages and
@@ -6470,13 +6482,22 @@ long follow_hugetlb_page(struct mm_struct *mm, struct vm_area_struct *vma,
 		 * each hugepage.  We have to make sure we get the
 		 * first, for the page indexing below to work.
 		 *
-		 * Note that page table lock is not held when pte is null.
+		 * Note that page table lock is not held when ptep is null.
 		 */
-		pte = hugetlb_walk(vma, vaddr & huge_page_mask(h),
+		ptep = hugetlb_walk(vma, vaddr & huge_page_mask(h),
 				   huge_page_size(h));
-		if (pte)
-			ptl = huge_pte_lock(h, mm, pte);
-		absent = !pte || huge_pte_none(huge_ptep_get(pte));
+		if (ptep) {
+			hugetlb_pte_populate(&hpte, ptep, huge_page_shift(h),
+					hpage_size_to_level(huge_page_size(h)));
+			hugetlb_hgm_walk(mm, vma, &hpte, vaddr,
+					PAGE_SIZE,
+					/*stop_at_none=*/true);
+			ptl = hugetlb_pte_lock(mm, &hpte);
+			ptep = hpte.ptep;
+			pte = huge_ptep_get(ptep);
+		}
+
+		absent = !ptep || huge_pte_none(pte);
 
 		/*
 		 * When coredumping, it suits get_dump_page if we just return
@@ -6487,11 +6508,18 @@ long follow_hugetlb_page(struct mm_struct *mm, struct vm_area_struct *vma,
 		 */
 		if (absent && (flags & FOLL_DUMP) &&
 		    !hugetlbfs_pagecache_present(h, vma, vaddr)) {
-			if (pte)
+			if (ptep)
 				spin_unlock(ptl);
 			hugetlb_vma_unlock_read(vma);
 			remainder = 0;
 			break;
+		}
+
+		if (!absent && pte_present(pte) &&
+				!hugetlb_pte_present_leaf(&hpte, pte)) {
+			/* We raced with someone splitting the PTE, so retry. */
+			spin_unlock(ptl);
+			continue;
 		}
 
 		/*
@@ -6509,7 +6537,11 @@ long follow_hugetlb_page(struct mm_struct *mm, struct vm_area_struct *vma,
 			vm_fault_t ret;
 			unsigned int fault_flags = 0;
 
-			if (pte)
+			/* Drop the lock before entering hugetlb_fault. */
+			if (hugetlb_hgm_enabled(vma))
+				hugetlb_vma_unlock_read(vma);
+
+			if (ptep)
 				spin_unlock(ptl);
 			hugetlb_vma_unlock_read(vma);
 
@@ -6534,7 +6566,7 @@ long follow_hugetlb_page(struct mm_struct *mm, struct vm_area_struct *vma,
 			if (ret & VM_FAULT_ERROR) {
 				err = vm_fault_to_errno(ret, flags);
 				remainder = 0;
-				break;
+				goto out;
 			}
 			if (ret & VM_FAULT_RETRY) {
 				if (locked &&
@@ -6552,11 +6584,15 @@ long follow_hugetlb_page(struct mm_struct *mm, struct vm_area_struct *vma,
 				 */
 				return i;
 			}
+			if (hugetlb_hgm_enabled(vma))
+				hugetlb_vma_lock_read(vma);
 			continue;
 		}
 
-		pfn_offset = (vaddr & ~huge_page_mask(h)) >> PAGE_SHIFT;
-		page = pte_page(huge_ptep_get(pte));
+		pfn_offset = (vaddr & ~hugetlb_pte_mask(&hpte)) >> PAGE_SHIFT;
+		subpage = pte_page(pte);
+		pages_per_hpte = hugetlb_pte_size(&hpte) / PAGE_SIZE;
+		page = compound_head(subpage);
 
 		VM_BUG_ON_PAGE((flags & FOLL_PIN) && PageAnon(page) &&
 			       !PageAnonExclusive(page), page);
@@ -6566,22 +6602,22 @@ long follow_hugetlb_page(struct mm_struct *mm, struct vm_area_struct *vma,
 		 * and skip the same_page loop below.
 		 */
 		if (!pages && !vmas && !pfn_offset &&
-		    (vaddr + huge_page_size(h) < vma->vm_end) &&
-		    (remainder >= pages_per_huge_page(h))) {
-			vaddr += huge_page_size(h);
-			remainder -= pages_per_huge_page(h);
-			i += pages_per_huge_page(h);
+		    (vaddr + pages_per_hpte < vma->vm_end) &&
+		    (remainder >= pages_per_hpte)) {
+			vaddr += pages_per_hpte;
+			remainder -= pages_per_hpte;
+			i += pages_per_hpte;
 			spin_unlock(ptl);
 			hugetlb_vma_unlock_read(vma);
 			continue;
 		}
 
 		/* vaddr may not be aligned to PAGE_SIZE */
-		refs = min3(pages_per_huge_page(h) - pfn_offset, remainder,
+		refs = min3(pages_per_hpte - pfn_offset, remainder,
 		    (vma->vm_end - ALIGN_DOWN(vaddr, PAGE_SIZE)) >> PAGE_SHIFT);
 
 		if (pages || vmas)
-			record_subpages_vmas(nth_page(page, pfn_offset),
+			record_subpages_vmas(nth_page(subpage, pfn_offset),
 					     vma, refs,
 					     likely(pages) ? pages + i : NULL,
 					     vmas ? vmas + i : NULL);
@@ -6614,6 +6650,9 @@ long follow_hugetlb_page(struct mm_struct *mm, struct vm_area_struct *vma,
 		spin_unlock(ptl);
 		hugetlb_vma_unlock_read(vma);
 	}
+	if (hugetlb_hgm_enabled(vma))
+		hugetlb_vma_unlock_read(vma);
+out:
 	*nr_pages = remainder;
 	/*
 	 * setting position is actually required only if remainder is
