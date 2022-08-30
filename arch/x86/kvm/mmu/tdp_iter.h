@@ -13,6 +13,12 @@
  * to be zapped while holding mmu_lock for read, and to allow TLB flushes to be
  * batched without having to collect the list of zapped SPs.  Flows that can
  * remove SPs must service pending TLB flushes prior to dropping RCU protection.
+ *
+ * The READ_ONCE() ensures that, if the SPTE points at a child shadow page, all
+ * fields in struct kvm_mmu_page will be read after the caller observes the
+ * present SPTE (KVM must check that the SPTE is present before following the
+ * SPTE's pfn to its associated shadow page).  Pairs with the implicit memory
+ * barrier in tdp_mmu_set_spte_atomic().
  */
 static inline u64 kvm_tdp_mmu_read_spte(tdp_ptep_t sptep)
 {

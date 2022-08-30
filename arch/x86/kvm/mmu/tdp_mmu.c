@@ -658,6 +658,11 @@ static inline int tdp_mmu_set_spte_atomic(struct kvm *kvm,
 	lockdep_assert_held_read(&kvm->mmu_lock);
 
 	/*
+	 * The atomic CMPXCHG64 provides an implicit memory barrier and ensures
+	 * that, if the SPTE points at a shadow page, all struct kvm_mmu_page
+	 * fields are visible to readers before the SPTE is marked present.
+	 * Pairs with ordering guarantees provided by kvm_tdp_mmu_read_spte().
+	 *
 	 * Note, fast_pf_fix_direct_spte() can also modify TDP MMU SPTEs and
 	 * does not hold the mmu_lock.
 	 */
