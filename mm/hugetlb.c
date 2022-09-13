@@ -5156,9 +5156,8 @@ again:
 				put_page(hpage);
 
 				/* Install the new huge page if src pte stable */
-				dst_ptl = huge_pte_lock(h, dst, dst_pte);
-				src_ptl = huge_pte_lockptr(huge_page_shift(h),
-							   src, src_pte);
+				dst_ptl = hugetlb_pte_lock(dst, &dst_hpte);
+				src_ptl = hugetlb_pte_lockptr(src, &src_hpte);
 				spin_lock_nested(src_ptl, SINGLE_DEPTH_NESTING);
 				entry = huge_ptep_get(src_pte);
 				if (!pte_same(src_pte_old, entry)) {
@@ -5207,16 +5206,16 @@ again:
 	return ret;
 }
 
-static void move_huge_pte(struct vm_area_struct *vma, unsigned long old_addr,
-			  unsigned long new_addr, pte_t *src_pte, pte_t *dst_pte)
+static void move_hugetlb_pte(struct vm_area_struct *vma, unsigned long old_addr,
+			     unsigned long new_addr, struct hugetlb_pte *src_hpte,
+			     struct hugetlb_pte *dst_hpte)
 {
-	struct hstate *h = hstate_vma(vma);
 	struct mm_struct *mm = vma->vm_mm;
 	spinlock_t *src_ptl, *dst_ptl;
 	pte_t pte;
 
-	dst_ptl = huge_pte_lock(h, mm, dst_pte);
-	src_ptl = huge_pte_lockptr(huge_page_shift(h), mm, src_pte);
+	dst_ptl = hugetlb_pte_lock(mm, dst_hpte);
+	src_ptl = hugetlb_pte_lockptr(mm, src_hpte);
 
 	/*
 	 * We don't have to worry about the ordering of src and dst ptlocks
@@ -5225,8 +5224,8 @@ static void move_huge_pte(struct vm_area_struct *vma, unsigned long old_addr,
 	if (src_ptl != dst_ptl)
 		spin_lock_nested(src_ptl, SINGLE_DEPTH_NESTING);
 
-	pte = huge_ptep_get_and_clear(mm, old_addr, src_pte);
-	set_huge_pte_at(mm, new_addr, dst_pte, pte);
+	pte = huge_ptep_get_and_clear(mm, old_addr, src_hpte->ptep);
+	set_huge_pte_at(mm, new_addr, dst_hpte->ptep, pte);
 
 	if (src_ptl != dst_ptl)
 		spin_unlock(src_ptl);
@@ -5247,6 +5246,7 @@ int move_hugetlb_page_tables(struct vm_area_struct *vma,
 	pte_t *src_pte, *dst_pte;
 	struct mmu_notifier_range range;
 	bool shared_pmd = false;
+	struct hugetlb_pte src_hpte, dst_hpte;
 
 	mmu_notifier_range_init(&range, MMU_NOTIFY_CLEAR, 0, vma, mm, old_addr,
 				old_end);
@@ -5283,7 +5283,11 @@ int move_hugetlb_page_tables(struct vm_area_struct *vma,
 		if (!dst_pte)
 			break;
 
-		move_huge_pte(vma, old_addr, new_addr, src_pte, dst_pte);
+		hugetlb_pte_populate(&src_hpte, src_pte, huge_page_shift(h),
+				     hpage_size_to_level(sz));
+		hugetlb_pte_populate(&dst_hpte, dst_pte, huge_page_shift(h),
+				     hpage_size_to_level(sz));
+		move_hugetlb_pte(vma, old_addr, new_addr, &src_hpte, &dst_hpte);
 	}
 
 	if (shared_pmd)
@@ -7437,6 +7441,7 @@ pte_t *huge_pmd_share(struct mm_struct *mm, struct vm_area_struct *vma,
 	pte_t *spte = NULL;
 	pte_t *pte;
 	spinlock_t *ptl;
+	struct hugetlb_pte hpte;
 
 	i_mmap_lock_read(mapping);
 	vma_interval_tree_foreach(svma, &mapping->i_mmap, idx, idx) {
@@ -7457,7 +7462,8 @@ pte_t *huge_pmd_share(struct mm_struct *mm, struct vm_area_struct *vma,
 	if (!spte)
 		goto out;
 
-	ptl = huge_pte_lock(hstate_vma(vma), mm, spte);
+	hugetlb_pte_populate(&hpte, (pte_t *)pud, PUD_SHIFT, HUGETLB_LEVEL_PUD);
+	ptl = hugetlb_pte_lock(mm, &hpte);
 	if (pud_none(*pud)) {
 		pud_populate(mm, pud,
 				(pmd_t *)((unsigned long)spte & PAGE_MASK));
@@ -8157,6 +8163,7 @@ void hugetlb_unshare_all_pmds(struct vm_area_struct *vma)
 	unsigned long address, start, end;
 	spinlock_t *ptl;
 	pte_t *ptep;
+	struct hugetlb_pte hpte;
 
 	if (!(vma->vm_flags & VM_MAYSHARE))
 		return;
@@ -8181,7 +8188,10 @@ void hugetlb_unshare_all_pmds(struct vm_area_struct *vma)
 		ptep = huge_pte_offset(mm, address, sz);
 		if (!ptep)
 			continue;
-		ptl = huge_pte_lock(h, mm, ptep);
+
+		hugetlb_pte_populate(&hpte, ptep, huge_page_shift(h),
+				hpage_size_to_level(sz));
+		ptl = hugetlb_pte_lock(mm, &hpte);
 		huge_pmd_unshare(mm, vma, address, ptep);
 		spin_unlock(ptl);
 	}
