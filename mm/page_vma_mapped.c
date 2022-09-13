@@ -165,21 +165,32 @@ bool page_vma_mapped_walk(struct page_vma_mapped_walk *pvmw)
 	if (unlikely(is_vm_hugetlb_page(vma))) {
 		struct hstate *hstate = hstate_vma(vma);
 		unsigned long size = huge_page_size(hstate);
+		struct hugetlb_pte hpte;
+		struct address_space *mapping = vma->vm_file->f_mapping;
+		pte_t *pte;
+		bool ret;
 		/* The only possible mapping was handled on last iteration */
 		if (pvmw->pte)
 			return not_found(pvmw);
 
 		/* when pud is not present, pte will be NULL */
-		pvmw->pte = huge_pte_offset(mm, pvmw->address, size);
-		if (!pvmw->pte)
+		pte = huge_pte_offset(mm, pvmw->address, size);
+		if (!pte)
 			return false;
 
-		pvmw->ptl = huge_pte_lockptr(huge_page_shift(hstate),
-					     mm, pvmw->pte);
-		spin_lock(pvmw->ptl);
+		hugetlb_pte_populate(&hpte, pte, huge_page_shift(hstate),
+				hpage_size_to_level(size));
+		/* Do a high granularity page table walk. */
+		i_mmap_lock_read(mapping);
+		hugetlb_walk_to(mm, &hpte, pvmw->address, PAGE_SIZE,
+				/*stop_at_none=*/true);
+		pvmw->pte = hpte.ptep;
+		pvmw->ptl = hugetlb_pte_lock(mm, &hpte);
+		ret = true;
 		if (!check_pte(pvmw))
-			return not_found(pvmw);
-		return true;
+			ret = not_found(pvmw);
+		i_mmap_unlock_read(mapping);
+		return ret;
 	}
 
 	end = vma_address_end(pvmw);
