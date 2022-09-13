@@ -353,6 +353,8 @@ static inline void page_vma_mapped_walk_done(struct page_vma_mapped_walk *pvmw)
 		pte_unmap(pvmw->pte);
 	if (pvmw->ptl)
 		spin_unlock(pvmw->ptl);
+	if (pvmw->pte && is_vm_hugetlb_page(pvmw->vma))
+		i_mmap_unlock_read(pvmw->vma->vm_file->f_mapping);
 }
 
 bool page_vma_mapped_walk(struct page_vma_mapped_walk *pvmw);
