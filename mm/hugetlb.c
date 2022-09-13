@@ -5324,9 +5324,8 @@ again:
 				put_page(hpage);
 
 				/* Install the new huge page if src pte stable */
-				dst_ptl = huge_pte_lock(h, dst, dst_pte);
-				src_ptl = huge_pte_lockptr(huge_page_shift(h),
-							   src, src_pte);
+				dst_ptl = hugetlb_pte_lock(&dst_hpte);
+				src_ptl = hugetlb_pte_lockptr(&src_hpte);
 				spin_lock_nested(src_ptl, SINGLE_DEPTH_NESTING);
 				entry = huge_ptep_get(src_pte);
 				if (!pte_same(src_pte_old, entry)) {
@@ -7420,7 +7419,8 @@ pte_t *huge_pmd_share(struct mm_struct *mm, struct vm_area_struct *vma,
 	unsigned long saddr;
 	pte_t *spte = NULL;
 	pte_t *pte;
-	spinlock_t *ptl;
+	struct hugetlb_pte hpte;
+	struct hstate *shstate;
 
 	i_mmap_lock_read(mapping);
 	vma_interval_tree_foreach(svma, &mapping->i_mmap, idx, idx) {
@@ -7441,7 +7441,11 @@ pte_t *huge_pmd_share(struct mm_struct *mm, struct vm_area_struct *vma,
 	if (!spte)
 		goto out;
 
-	ptl = huge_pte_lock(hstate_vma(vma), mm, spte);
+	shstate = hstate_vma(svma);
+
+	hugetlb_pte_init(mm, &hpte, spte, huge_page_shift(shstate),
+			 hpage_size_to_level(huge_page_size(shstate)));
+	spin_lock(hpte.ptl);
 	if (pud_none(*pud)) {
 		pud_populate(mm, pud,
 				(pmd_t *)((unsigned long)spte & PAGE_MASK));
@@ -7449,7 +7453,7 @@ pte_t *huge_pmd_share(struct mm_struct *mm, struct vm_area_struct *vma,
 	} else {
 		put_page(virt_to_page(spte));
 	}
-	spin_unlock(ptl);
+	spin_unlock(hpte.ptl);
 out:
 	pte = (pte_t *)pmd_alloc(mm, pud, addr);
 	i_mmap_unlock_read(mapping);
@@ -8162,6 +8166,7 @@ static void hugetlb_unshare_pmds(struct vm_area_struct *vma,
 	unsigned long address;
 	spinlock_t *ptl;
 	pte_t *ptep;
+	struct hugetlb_pte hpte;
 
 	if (!(vma->vm_flags & VM_MAYSHARE))
 		return;
@@ -8183,7 +8188,10 @@ static void hugetlb_unshare_pmds(struct vm_area_struct *vma,
 		ptep = hugetlb_walk(vma, address, sz);
 		if (!ptep)
 			continue;
-		ptl = huge_pte_lock(h, mm, ptep);
+
+		hugetlb_pte_init(mm, &hpte, ptep, huge_page_shift(h),
+				 hpage_size_to_level(sz));
+		ptl = hugetlb_pte_lock(&hpte);
 		huge_pmd_unshare(mm, vma, address, ptep);
 		spin_unlock(ptl);
 	}
