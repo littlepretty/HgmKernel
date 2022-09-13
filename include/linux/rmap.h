@@ -13,6 +13,7 @@
 #include <linux/highmem.h>
 #include <linux/pagemap.h>
 #include <linux/memremap.h>
+#include <linux/hugetlb.h>
 
 /*
  * The anon_vma heads a list of private "related" vmas, to scan if
@@ -409,6 +410,9 @@ static inline void page_vma_mapped_walk_done(struct page_vma_mapped_walk *pvmw)
 		pte_unmap(pvmw->pte);
 	if (pvmw->ptl)
 		spin_unlock(pvmw->ptl);
+	if (pvmw->pte && is_vm_hugetlb_page(pvmw->vma) &&
+			hugetlb_hgm_enabled(pvmw->vma))
+		hugetlb_vma_unlock_read(pvmw->vma);
 }
 
 bool page_vma_mapped_walk(struct page_vma_mapped_walk *pvmw);

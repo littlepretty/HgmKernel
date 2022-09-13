@@ -1544,17 +1544,23 @@ static bool try_to_unmap_one(struct folio *folio, struct vm_area_struct *vma,
 			flush_cache_range(vma, range.start, range.end);
 
 			/*
-			 * To call huge_pmd_unshare, i_mmap_rwsem must be
-			 * held in write mode.  Caller needs to explicitly
-			 * do this outside rmap routines.
-			 *
-			 * We also must hold hugetlb vma_lock in write mode.
-			 * Lock order dictates acquiring vma_lock BEFORE
-			 * i_mmap_rwsem.  We can only try lock here and fail
-			 * if unsuccessful.
+			 * If HGM is enabled, we have already grabbed the VMA
+			 * lock for reading, and we cannot safely release it.
+			 * Because HGM-enabled VMAs have already unshared all
+			 * PMDs, we can safely ignore PMD unsharing here.
 			 */
-			if (!anon) {
+			if (!anon && !hugetlb_hgm_enabled(vma)) {
 				VM_BUG_ON(!(flags & TTU_RMAP_LOCKED));
+				/*
+				 * To call huge_pmd_unshare, i_mmap_rwsem must
+				 * be held in write mode.  Caller needs to
+				 * explicitly do this outside rmap routines.
+				 *
+				 * We also must hold hugetlb vma_lock in write
+				 * mode. Lock order dictates acquiring vma_lock
+				 * BEFORE i_mmap_rwsem.  We can only try lock
+				 * here and fail if unsuccessful.
+				 */
 				if (!hugetlb_vma_trylock_write(vma)) {
 					page_vma_mapped_walk_done(&pvmw);
 					ret = false;
@@ -1938,17 +1944,23 @@ static bool try_to_migrate_one(struct folio *folio, struct vm_area_struct *vma,
 			flush_cache_range(vma, range.start, range.end);
 
 			/*
-			 * To call huge_pmd_unshare, i_mmap_rwsem must be
-			 * held in write mode.  Caller needs to explicitly
-			 * do this outside rmap routines.
-			 *
-			 * We also must hold hugetlb vma_lock in write mode.
-			 * Lock order dictates acquiring vma_lock BEFORE
-			 * i_mmap_rwsem.  We can only try lock here and
-			 * fail if unsuccessful.
+			 * If HGM is enabled, we have already grabbed the VMA
+			 * lock for reading, and we cannot safely release it.
+			 * Because HGM-enabled VMAs have already unshared all
+			 * PMDs, we can safely ignore PMD unsharing here.
 			 */
-			if (!anon) {
+			if (!anon && !hugetlb_hgm_enabled(vma)) {
 				VM_BUG_ON(!(flags & TTU_RMAP_LOCKED));
+				/*
+				 * To call huge_pmd_unshare, i_mmap_rwsem must
+				 * be held in write mode.  Caller needs to
+				 * explicitly do this outside rmap routines.
+				 *
+				 * We also must hold hugetlb vma_lock in write
+				 * mode. Lock order dictates acquiring vma_lock
+				 * BEFORE i_mmap_rwsem.  We can only try lock
+				 * here and fail if unsuccessful.
+				 */
 				if (!hugetlb_vma_trylock_write(vma)) {
 					page_vma_mapped_walk_done(&pvmw);
 					ret = false;
