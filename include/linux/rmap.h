@@ -13,6 +13,7 @@
 #include <linux/highmem.h>
 #include <linux/pagemap.h>
 #include <linux/memremap.h>
+#include <linux/hugetlb.h>
 
 /*
  * The anon_vma heads a list of private "related" vmas, to scan if

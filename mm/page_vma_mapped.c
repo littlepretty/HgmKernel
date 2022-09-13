@@ -133,7 +133,8 @@ static void step_forward(struct page_vma_mapped_walk *pvmw, unsigned long size)
  *
  * Returns true if the page is mapped in the vma. @pvmw->pmd and @pvmw->pte point
  * to relevant page table entries. @pvmw->ptl is locked. @pvmw->address is
- * adjusted if needed (for PTE-mapped THPs).
+ * adjusted if needed (for PTE-mapped THPs and high-granularity-mapped HugeTLB
+ * pages).
  *
  * If @pvmw->pmd is set but @pvmw->pte is not, you have found PMD-mapped page
  * (usually THP). For PTE-mapped THP, you should run page_vma_mapped_walk() in
@@ -165,23 +166,47 @@ bool page_vma_mapped_walk(struct page_vma_mapped_walk *pvmw)
 
 	if (unlikely(is_vm_hugetlb_page(vma))) {
 		struct hstate *hstate = hstate_vma(vma);
-		unsigned long size = huge_page_size(hstate);
-		/* The only possible mapping was handled on last iteration */
-		if (pvmw->pte)
-			return not_found(pvmw);
-		/*
-                 * All callers that get here will already hold the
-                 * i_mmap_rwsem.  Therefore, no additional locks need to be
-                 * taken before calling hugetlb_walk().
-		 */
-		pvmw->pte = hugetlb_walk(vma, pvmw->address, size);
-		if (!pvmw->pte)
-			return false;
+		struct hugetlb_pte hpte;
+		pte_t pteval;
 
-		pvmw->pte_order = huge_page_order(hstate);
-		pvmw->ptl = huge_pte_lock(hstate, mm, pvmw->pte);
-		if (!check_pte(pvmw))
-			return not_found(pvmw);
+		end = (pvmw->address & huge_page_mask(hstate)) +
+			huge_page_size(hstate);
+
+		do {
+			if (pvmw->pte) {
+				if (pvmw->ptl)
+					spin_unlock(pvmw->ptl);
+				pvmw->ptl = NULL;
+				pvmw->address += PAGE_SIZE << pvmw->pte_order;
+				if (pvmw->address >= end)
+					return not_found(pvmw);
+			}
+
+			/*
+			 * All callers that get here will already hold the
+			 * i_mmap_rwsem. Therefore, no additional locks need to
+			 * be taken before calling hugetlb_walk().
+			 */
+			if (hugetlb_full_walk(&hpte, vma, pvmw->address))
+				return not_found(pvmw);
+
+retry:
+			pvmw->pte = hpte.ptep;
+			pvmw->pte_order = hpte.shift - PAGE_SHIFT;
+			pvmw->ptl = hugetlb_pte_lock(&hpte);
+			pteval = huge_ptep_get(hpte.ptep);
+			if (pte_present(pteval) && !hugetlb_pte_present_leaf(
+						&hpte, pteval)) {
+				/*
+				 * Someone split from under us, so keep
+				 * walking.
+				 */
+				spin_unlock(pvmw->ptl);
+				hugetlb_full_walk_continue(&hpte, vma,
+						pvmw->address);
+				goto retry;
+			}
+		} while (!check_pte(pvmw));
 		return true;
 	}
 
