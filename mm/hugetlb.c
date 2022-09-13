@@ -5142,9 +5142,8 @@ again:
 				put_page(hpage);
 
 				/* Install the new huge page if src pte stable */
-				dst_ptl = huge_pte_lock(h, dst, dst_pte);
-				src_ptl = huge_pte_lockptr(huge_page_shift(h),
-							   src, src_pte);
+				dst_ptl = hugetlb_pte_lock(dst, &dst_hpte);
+				src_ptl = hugetlb_pte_lockptr(src, &src_hpte);
 				spin_lock_nested(src_ptl, SINGLE_DEPTH_NESTING);
 				entry = huge_ptep_get(src_pte);
 				if (!pte_same(src_pte_old, entry)) {
@@ -5201,8 +5200,8 @@ static void move_hugetlb_pte(struct vm_area_struct *vma, unsigned long old_addr,
 	spinlock_t *src_ptl, *dst_ptl;
 	pte_t pte;
 
-	dst_ptl = hugetlb_pte_lock(h, dst_hpte);
-	src_ptl = hugetlb_pte_lockptr(h, src_hpte);
+	dst_ptl = hugetlb_pte_lock(mm, dst_hpte);
+	src_ptl = hugetlb_pte_lockptr(mm, src_hpte);
 
 	/*
 	 * We don't have to worry about the ordering of src and dst ptlocks
@@ -7444,6 +7443,7 @@ pte_t *huge_pmd_share(struct mm_struct *mm, struct vm_area_struct *vma,
 	pte_t *spte = NULL;
 	pte_t *pte;
 	spinlock_t *ptl;
+	struct hugetlb_pte hpte;
 
 	i_mmap_lock_read(mapping);
 	vma_interval_tree_foreach(svma, &mapping->i_mmap, idx, idx) {
@@ -7464,7 +7464,8 @@ pte_t *huge_pmd_share(struct mm_struct *mm, struct vm_area_struct *vma,
 	if (!spte)
 		goto out;
 
-	ptl = huge_pte_lock(hstate_vma(vma), mm, spte);
+	hugetlb_pte_populate(&hpte, (pte_t *)pud, PUD_SHIFT, HUGETLB_LEVEL_PUD);
+	ptl = hugetlb_pte_lock(mm, &hpte);
 	if (pud_none(*pud)) {
 		pud_populate(mm, pud,
 				(pmd_t *)((unsigned long)spte & PAGE_MASK));
@@ -8166,6 +8167,7 @@ void hugetlb_unshare_all_pmds(struct vm_area_struct *vma)
 	unsigned long address, start, end;
 	spinlock_t *ptl;
 	pte_t *ptep;
+	struct hugetlb_pte hpte;
 
 	if (!(vma->vm_flags & VM_MAYSHARE))
 		return;
@@ -8190,7 +8192,10 @@ void hugetlb_unshare_all_pmds(struct vm_area_struct *vma)
 		ptep = huge_pte_offset(mm, address, sz);
 		if (!ptep)
 			continue;
-		ptl = huge_pte_lock(h, mm, ptep);
+
+		hugetlb_pte_populate(&hpte, ptep, huge_page_shift(h),
+				hpage_size_to_level(sz));
+		ptl = hugetlb_pte_lock(mm, &hpte);
 		huge_pmd_unshare(mm, vma, address, ptep);
 		spin_unlock(ptl);
 	}
