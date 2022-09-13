@@ -133,7 +133,8 @@ static void step_forward(struct page_vma_mapped_walk *pvmw, unsigned long size)
  *
  * Returns true if the page is mapped in the vma. @pvmw->pmd and @pvmw->pte point
  * to relevant page table entries. @pvmw->ptl is locked. @pvmw->address is
- * adjusted if needed (for PTE-mapped THPs).
+ * adjusted if needed (for PTE-mapped THPs and high-granularity--mapped HugeTLB
+ * pages).
  *
  * If @pvmw->pmd is set but @pvmw->pte is not, you have found PMD-mapped page
  * (usually THP). For PTE-mapped THP, you should run page_vma_mapped_walk() in
@@ -166,21 +167,52 @@ bool page_vma_mapped_walk(struct page_vma_mapped_walk *pvmw)
 	if (unlikely(is_vm_hugetlb_page(vma))) {
 		struct hstate *hstate = hstate_vma(vma);
 		unsigned long size = huge_page_size(hstate);
-		/* The only possible mapping was handled on last iteration */
-		if (pvmw->pte)
-			return not_found(pvmw);
+		struct hugetlb_pte hpte;
+		pte_t *pte;
+		end = (pvmw->address & huge_page_mask(hstate)) +
+			huge_page_size(hstate);
 
 		/* when pud is not present, pte will be NULL */
-		pvmw->pte = huge_pte_offset(mm, pvmw->address, size);
-		if (!pvmw->pte)
+		pte = huge_pte_offset(mm, pvmw->address, size);
+		if (!pte)
 			return false;
 
-		pvmw->pte_order = huge_page_order(hstate);
-		pvmw->ptl = huge_pte_lockptr(huge_page_shift(hstate),
-					     mm, pvmw->pte);
-		spin_lock(pvmw->ptl);
-		if (!check_pte(pvmw))
-			return not_found(pvmw);
+		do {
+			hugetlb_pte_populate(&hpte, pte, huge_page_shift(hstate),
+					hpage_size_to_level(size));
+
+			/*
+			 * Do a high granularity page table walk. The vma lock
+			 * is grabbed here to prevent the page table from being
+			 * collapsed mid-walk. It is dropped in
+			 * page_vma_mapped_walk_done().
+			 *
+			 * If HGM is enabled, hugetlb_vma_lock_read will always
+			 * actually grab the VMA lock. If HGM is not enabled,
+			 * it may or may not grab the lock. If it does not grab
+			 * the lock, we are guaranteed that
+			 * hugetlb_vma_unlock_read in
+			 * page_vma_mapped_walk_done() will not unlock
+			 * anything because we are holding the mmap lock.
+			 */
+			if (pvmw->pte) {
+				if (pvmw->ptl)
+					spin_unlock(pvmw->ptl);
+				pvmw->ptl = NULL;
+				pvmw->address += PAGE_SIZE << pvmw->pte_order;
+				if (pvmw->address >= end)
+					return not_found(pvmw);
+			} else
+				/* Only grab the lock once. */
+				hugetlb_vma_lock_read(vma);
+
+			hugetlb_hgm_walk(mm, vma, &hpte, pvmw->address,
+					PAGE_SIZE, /*stop_at_none=*/true);
+
+			pvmw->pte = hpte.ptep;
+			pvmw->pte_order = hpte.shift - PAGE_SHIFT;
+		} while (!check_pte(pvmw));
+		pvmw->ptl = hugetlb_pte_lock(mm, &hpte);
 		return true;
 	}
 
