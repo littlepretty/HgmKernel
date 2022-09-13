@@ -258,11 +258,14 @@ int huge_ptep_set_access_flags(struct vm_area_struct *vma,
 
 #ifdef CONFIG_PPC_BOOK3S_64
 		struct hstate *h = hstate_vma(vma);
+		struct hugetlb_pte hpte;
 
 		psize = hstate_get_psize(h);
 #ifdef CONFIG_DEBUG_VM
-		assert_spin_locked(huge_pte_lockptr(huge_page_shift(h),
-						    vma->vm_mm, ptep));
+		/* HGM is not supported for powerpc yet. */
+		hugetlb_pte_populate(&hpte, ptep, huge_page_shift(h),
+				hpage_size_to_level(psize));
+		assert_spin_locked(hpte.ptl);
 #endif
 
 #else
