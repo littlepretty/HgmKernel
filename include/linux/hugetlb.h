@@ -1042,14 +1042,6 @@ static inline gfp_t htlb_modify_alloc_mask(struct hstate *h, gfp_t gfp_mask)
 	return modified_mask;
 }
 
-static inline spinlock_t *huge_pte_lockptr(unsigned int shift,
-					   struct mm_struct *mm, pte_t *pte)
-{
-	if (shift == PMD_SHIFT)
-		return pmd_lockptr(mm, (pmd_t *) pte);
-	return &mm->page_table_lock;
-}
-
 #ifndef hugepages_supported
 /*
  * Some platform decide whether they support huge pages at boot
@@ -1258,12 +1250,6 @@ static inline gfp_t htlb_modify_alloc_mask(struct hstate *h, gfp_t gfp_mask)
 	return 0;
 }
 
-static inline spinlock_t *huge_pte_lockptr(unsigned int shift,
-					   struct mm_struct *mm, pte_t *pte)
-{
-	return &mm->page_table_lock;
-}
-
 static inline void hugetlb_count_init(struct mm_struct *mm)
 {
 }
@@ -1339,16 +1325,6 @@ int hugetlb_collapse(struct mm_struct *mm, struct vm_area_struct *vma,
 }
 #endif
 
-static inline spinlock_t *huge_pte_lock(struct hstate *h,
-					struct mm_struct *mm, pte_t *pte)
-{
-	spinlock_t *ptl;
-
-	ptl = huge_pte_lockptr(huge_page_shift(h), mm, pte);
-	spin_lock(ptl);
-	return ptl;
-}
-
 static inline
 spinlock_t *hugetlb_pte_lockptr(struct mm_struct *mm, struct hugetlb_pte *hpte)
 {
@@ -1356,7 +1332,9 @@ spinlock_t *hugetlb_pte_lockptr(struct mm_struct *mm, struct hugetlb_pte *hpte)
 	BUG_ON(!hpte->ptep);
 	if (hpte->ptl)
 		return hpte->ptl;
-	return huge_pte_lockptr(hugetlb_pte_shift(hpte), mm, hpte->ptep);
+	if (hugetlb_pte_level(hpte) == HUGETLB_LEVEL_PMD)
+		return pmd_lockptr(mm, (pmd_t *) hpte->ptep);
+	return &mm->page_table_lock;
 }
 
 static inline
