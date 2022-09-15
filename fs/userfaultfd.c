@@ -239,19 +239,30 @@ static inline bool userfaultfd_huge_must_wait(struct userfaultfd_ctx *ctx,
 	struct mm_struct *mm = ctx->mm;
 	pte_t *ptep, pte;
 	bool ret = true;
+	struct hugetlb_pte hpte;
+	unsigned long sz = vma_mmu_pagesize(vma);
+	unsigned int shift = huge_page_shift(hstate_vma(vma));
+	struct address_space *mapping = vma->vm_file->f_mapping;
 
 	mmap_assert_locked(mm);
 
-	ptep = huge_pte_offset(mm, address, vma_mmu_pagesize(vma));
+	ptep = huge_pte_offset(mm, address, sz);
 
 	if (!ptep)
 		goto out;
 
-	if (hugetlb_hgm_enabled(vma))
-		goto out;
+	if (hugetlb_hgm_enabled(vma)) {
+		hugetlb_pte_populate(&hpte, ptep, shift, hpage_size_to_level(sz));
+		i_mmap_lock_read(mapping);
+		hugetlb_walk_to(mm, &hpte, address, PAGE_SIZE,
+				/*stop_at_none=*/true);
+		ptep = hpte.ptep;
+	}
 
 	ret = false;
 	pte = huge_ptep_get(ptep);
+	if (hugetlb_hgm_enabled(vma))
+		i_mmap_unlock_read(mapping);
 
 	/*
 	 * Lockless access: we're in a wait_event so it's ok if it
@@ -515,11 +526,11 @@ vm_fault_t handle_userfault(struct vm_fault *vmf, unsigned long reason)
 	spin_unlock_irq(&ctx->fault_pending_wqh.lock);
 
 	if (!is_vm_hugetlb_page(vmf->vma))
-		must_wait = userfaultfd_must_wait(ctx, vmf->address, vmf->flags,
-						  reason);
+		must_wait = userfaultfd_must_wait(ctx, vmf->real_address,
+				vmf->flags, reason);
 	else
 		must_wait = userfaultfd_huge_must_wait(ctx, vmf->vma,
-						       vmf->address,
+						       vmf->real_address,
 						       vmf->flags, reason);
 	mmap_read_unlock(mm);
 
