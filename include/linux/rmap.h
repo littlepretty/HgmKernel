@@ -387,6 +387,7 @@ struct page_vma_mapped_walk {
 	pmd_t *pmd;
 	pte_t *pte;
 	spinlock_t *ptl;
+	unsigned int pte_order;
 	unsigned int flags;
 };
 
