@@ -6046,9 +6046,11 @@ vm_fault_t hugetlb_fault(struct mm_struct *mm, struct vm_area_struct *vma,
 		 * OK as we are only making decisions based on content and
 		 * not actually modifying content here.
 		 */
+		hugetlb_pte_populate(&hpte, ptep, huge_page_shift(h),
+				hpage_size_to_level(huge_page_size(h)));
 		entry = huge_ptep_get(ptep);
 		if (unlikely(is_hugetlb_entry_migration(entry))) {
-			migration_entry_wait_huge(vma, ptep);
+			migration_entry_wait_huge(vma, &hpte);
 			return 0;
 		} else if (unlikely(is_hugetlb_entry_hwpoisoned(entry)))
 			return VM_FAULT_HWPOISON_LARGE |
@@ -6088,7 +6090,17 @@ vm_fault_t hugetlb_fault(struct mm_struct *mm, struct vm_area_struct *vma,
 	hugetlb_hgm_walk(mm, vma, &hpte, address, PAGE_SIZE,
 			/*stop_at_none=*/true);
 
+	/*
+	 * Now that we have done a high-granularity walk, check again if we are
+	 * looking at a migration entry.
+	 */
 	entry = huge_ptep_get(hpte.ptep);
+	if (unlikely(is_hugetlb_entry_migration(entry))) {
+		i_mmap_unlock_read(mapping);
+		migration_entry_wait_huge(vma, &hpte);
+		return 0;
+	}
+
 	/* PTE markers should be handled the same way as none pte */
 	if (huge_pte_none_mostly(entry)) {
 		/*
