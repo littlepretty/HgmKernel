@@ -7205,7 +7205,9 @@ int hugetlb_walk_to(struct mm_struct *mm, struct hugetlb_pte *hpte,
 				if (!ptep)
 					return -ENOMEM;
 				hugetlb_pte_populate(hpte, ptep, PAGE_SHIFT,
-						HUGETLB_LEVEL_PTE);
+							HUGETLB_LEVEL_PTE);
+				hpte->ptl = pte_lockptr(
+						mm, (pmd_t *)hpte->ptep);
 				break;
 			default:
 				BUG();

@@ -61,6 +61,7 @@ struct hugetlb_pte {
 	pte_t *ptep;
 	unsigned int shift;
 	hugetlb_level_t level;
+	spinlock_t *ptl;
 };
 
 static inline
@@ -77,6 +78,7 @@ void hugetlb_pte_populate(struct hugetlb_pte *hpte, pte_t *ptep,
 	hpte->ptep = ptep;
 	hpte->shift = shift;
 	hpte->level = level;
+	hpte->ptl = NULL;
 }
 
 static inline
@@ -113,6 +115,7 @@ void hugetlb_pte_copy(struct hugetlb_pte *dest, const struct hugetlb_pte *src)
 	dest->ptep = src->ptep;
 	dest->shift = src->shift;
 	dest->level = src->level;
+	dest->ptl = src->ptl;
 }
 
 bool hugetlb_pte_present_leaf(const struct hugetlb_pte *hpte);
@@ -1234,6 +1237,8 @@ spinlock_t *hugetlb_pte_lockptr(struct mm_struct *mm,
 {
 
 	BUG_ON(!hpte->ptep);
+	if (hpte->ptl)
+		return hpte->ptl;
 	if (hugetlb_pte_level(hpte) == HUGETLB_LEVEL_PMD)
 		return pmd_lockptr(mm, (pmd_t *) hpte->ptep);
 	return &mm->page_table_lock;
