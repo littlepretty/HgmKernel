@@ -566,17 +566,45 @@ static int queue_pages_hugetlb(struct hugetlb_pte *hpte,
 	struct queue_pages *qp = walk->private;
 	unsigned long flags = (qp->flags & MPOL_MF_VALID);
 	struct page *page;
+	struct vm_area_struct *vma = walk->vma;
+	struct mm_struct *mm = vma->vm_mm;
+	struct address_space *mapping = vma->vm_file->f_mapping;
 	spinlock_t *ptl;
 	pte_t entry;
 
-	/* We don't migrate high-granularity HugeTLB mappings for now. */
-	if (high_granularity || !hugetlb_pte_present_leaf(hpte))
-		return -EINVAL;
+	if (high_granularity)
+		return 0;
 
 	ptl = hugetlb_pte_lock(walk->mm, hpte);
 	entry = huge_ptep_get(hpte->ptep);
 	if (!pte_present(entry))
 		goto unlock;
+
+	/*
+	 * To avoid putting the same hugepage on the migrate list, we collapse
+	 * the mappings first (if possible). We can't collapse the mapping if
+	 * it belongs to a userfaultfd-armed VMA, so we ignore those cases.
+	 *
+	 * The migration code supports the case where the page is mapped at
+	 * high granularity in other VMAs (or in this one following this
+	 * check).
+	 */
+	if (!hugetlb_pte_present_leaf(hpte)) {
+		ret = -EINVAL;
+		if (userfaultfd_armed(walk->vma))
+			goto unlock;
+		/* Upgrade our lock for writing to do the collapse. */
+		i_mmap_unlock_read(mapping);
+		i_mmap_lock_write(mapping);
+		ret = hugetlb_collapse(mm, vma, addr, hugetlb_pte_size(hpte));
+		/* Downgrade and have the caller walk again. */
+		i_mmap_unlock_write(mapping);
+		i_mmap_lock_read(mapping);
+		if (ret)
+			return ret;
+		return -EAGAIN;
+	}
+
 	page = pte_page(entry);
 	if (!queue_pages_required(page, qp))
 		goto unlock;
