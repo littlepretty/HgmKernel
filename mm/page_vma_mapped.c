@@ -16,6 +16,7 @@ static inline bool not_found(struct page_vma_mapped_walk *pvmw)
 static bool map_pte(struct page_vma_mapped_walk *pvmw)
 {
 	pvmw->pte = pte_offset_map(pvmw->pmd, pvmw->address);
+	pvmw->pte_order = 0;
 	if (!(pvmw->flags & PVMW_SYNC)) {
 		if (pvmw->flags & PVMW_MIGRATION) {
 			if (!is_swap_pte(*pvmw->pte))
@@ -174,6 +175,7 @@ bool page_vma_mapped_walk(struct page_vma_mapped_walk *pvmw)
 		if (!pvmw->pte)
 			return false;
 
+		pvmw->pte_order = huge_page_order(hstate);
 		pvmw->ptl = huge_pte_lockptr(huge_page_shift(hstate),
 					     mm, pvmw->pte);
 		spin_lock(pvmw->ptl);
@@ -271,6 +273,7 @@ next_pte:
 				}
 				pte_unmap(pvmw->pte);
 				pvmw->pte = NULL;
+				pvmw->pte_order = 0;
 				goto restart;
 			}
 			pvmw->pte++;
