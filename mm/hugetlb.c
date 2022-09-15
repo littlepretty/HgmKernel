@@ -6115,7 +6115,18 @@ vm_fault_t hugetlb_fault(struct mm_struct *mm, struct vm_area_struct *vma,
 	hugetlb_hgm_walk(mm, vma, &hpte, address, PAGE_SIZE,
 			/*stop_at_none=*/true);
 
+	/*
+	 * Now that we have done a high-granularity walk, check again if we are
+	 * looking at a migration entry.
+	 */
 	entry = huge_ptep_get(hpte.ptep);
+	if (unlikely(is_hugetlb_entry_migration(entry))) {
+		hugetlb_vma_unlock_read(vma);
+		mutex_unlock(&hugetlb_fault_mutex_table[hash]);
+		migration_entry_wait_huge(vma, &hpte);
+		return 0;
+	}
+
 	/* PTE markers should be handled the same way as none pte */
 	if (huge_pte_none_mostly(entry)) {
 		/*
