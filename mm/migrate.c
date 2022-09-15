@@ -333,12 +333,12 @@ void __migration_entry_wait_huge(pte_t *ptep, spinlock_t *ptl)
 		migration_entry_wait_on_locked(pte_to_swp_entry(pte), NULL, ptl);
 }
 
-void migration_entry_wait_huge(struct vm_area_struct *vma, pte_t *pte)
+void migration_entry_wait_huge(struct vm_area_struct *vma,
+				struct hugetlb_pte *hpte)
 {
-	spinlock_t *ptl = huge_pte_lockptr(huge_page_shift(hstate_vma(vma)),
-					   vma->vm_mm, pte);
+	spinlock_t *ptl = hugetlb_pte_lockptr(vma->vm_mm, hpte);
 
-	__migration_entry_wait_huge(pte, ptl);
+	__migration_entry_wait_huge(hpte->ptep, ptl);
 }
 #endif
 
