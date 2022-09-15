@@ -1604,7 +1604,7 @@ static bool try_to_unmap_one(struct folio *folio, struct vm_area_struct *vma,
 		if (PageHWPoison(subpage) && !(flags & TTU_IGNORE_HWPOISON)) {
 			pteval = swp_entry_to_pte(make_hwpoison_entry(subpage));
 			if (folio_test_hugetlb(folio)) {
-				hugetlb_count_sub(folio_nr_pages(folio), mm);
+				hugetlb_count_sub(1UL << pvmw.pte_order, mm);
 				set_huge_pte_at(mm, address, pvmw.pte, pteval);
 			} else {
 				dec_mm_counter(mm, mm_counter(&folio->page));
@@ -1763,7 +1763,11 @@ discard:
 		 *
 		 * See Documentation/mm/mmu_notifier.rst
 		 */
-		page_remove_rmap(subpage, vma, folio_test_hugetlb(folio));
+		if (folio_test_hugetlb(folio))
+			page_remove_rmap(&folio->page, vma, true);
+		else
+			page_remove_rmap(subpage, vma, false);
+
 		if (vma->vm_flags & VM_LOCKED)
 			mlock_page_drain_local();
 		folio_put(folio);
@@ -2026,7 +2030,7 @@ static bool try_to_migrate_one(struct folio *folio, struct vm_area_struct *vma,
 		} else if (PageHWPoison(subpage)) {
 			pteval = swp_entry_to_pte(make_hwpoison_entry(subpage));
 			if (folio_test_hugetlb(folio)) {
-				hugetlb_count_sub(folio_nr_pages(folio), mm);
+				hugetlb_count_sub(1L << pvmw.pte_order, mm);
 				set_huge_pte_at(mm, address, pvmw.pte, pteval);
 			} else {
 				dec_mm_counter(mm, mm_counter(&folio->page));
@@ -2118,7 +2122,10 @@ static bool try_to_migrate_one(struct folio *folio, struct vm_area_struct *vma,
 		 *
 		 * See Documentation/mm/mmu_notifier.rst
 		 */
-		page_remove_rmap(subpage, vma, folio_test_hugetlb(folio));
+		if (folio_test_hugetlb(folio))
+			page_remove_rmap(&folio->page, vma, true);
+		else
+			page_remove_rmap(subpage, vma, false);
 		if (vma->vm_flags & VM_LOCKED)
 			mlock_page_drain_local();
 		folio_put(folio);
@@ -2201,6 +2208,8 @@ static bool page_make_device_exclusive_one(struct folio *folio,
 				      address + folio_size(folio)),
 				      args->owner);
 	mmu_notifier_invalidate_range_start(&range);
+
+	VM_BUG_ON_FOLIO(folio_test_hugetlb(folio), folio);
 
 	while (page_vma_mapped_walk(&pvmw)) {
 		/* Unexpected PMD-mapped THP? */
