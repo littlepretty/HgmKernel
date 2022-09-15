@@ -424,6 +424,7 @@ struct queue_pages {
 	unsigned long start;
 	unsigned long end;
 	struct vm_area_struct *first;
+	struct page *last_page;
 };
 
 /*
@@ -475,6 +476,7 @@ static int queue_pages_pmd(pmd_t *pmd, spinlock_t *ptl, unsigned long addr,
 	flags = qp->flags;
 	/* go to thp migration */
 	if (flags & (MPOL_MF_MOVE | MPOL_MF_MOVE_ALL)) {
+		qp->last_page = page;
 		if (!vma_migratable(walk->vma) ||
 		    migrate_page_add(page, qp->pagelist, flags)) {
 			ret = 1;
@@ -532,12 +534,15 @@ static int queue_pages_pte_range(pmd_t *pmd, unsigned long addr,
 			continue;
 		if (!queue_pages_required(page, qp))
 			continue;
+
 		if (flags & (MPOL_MF_MOVE | MPOL_MF_MOVE_ALL)) {
 			/* MPOL_MF_STRICT must be specified if we get here */
 			if (!vma_migratable(vma)) {
 				has_unmovable = true;
 				break;
 			}
+
+			qp->last_page = page;
 
 			/*
 			 * Do not abort immediately since there may be
@@ -570,15 +575,22 @@ static int queue_pages_hugetlb(struct hugetlb_pte *hpte,
 	spinlock_t *ptl;
 	pte_t entry;
 
-	/* We don't migrate high-granularity HugeTLB mappings for now. */
-	if (hugetlb_hgm_enabled(walk->vma))
-		return -EINVAL;
-
 	ptl = hugetlb_pte_lock(hpte);
 	entry = huge_ptep_get(hpte->ptep);
 	if (!pte_present(entry))
 		goto unlock;
-	page = pte_page(entry);
+
+	if (!hugetlb_pte_present_leaf(hpte, entry)) {
+		ret = -EAGAIN;
+		goto unlock;
+	}
+
+	page = compound_head(pte_page(entry));
+
+	/* We already queued this page with another high-granularity PTE. */
+	if (page == qp->last_page)
+		goto unlock;
+
 	if (!queue_pages_required(page, qp))
 		goto unlock;
 
@@ -605,6 +617,7 @@ static int queue_pages_hugetlb(struct hugetlb_pte *hpte,
 	/* With MPOL_MF_MOVE, we migrate only unshared hugepage. */
 	if (flags & (MPOL_MF_MOVE_ALL) ||
 	    (flags & MPOL_MF_MOVE && page_mapcount(page) == 1)) {
+		qp->last_page = page;
 		if (isolate_hugetlb(page, qp->pagelist) &&
 			(flags & MPOL_MF_STRICT))
 			/*
@@ -739,6 +752,7 @@ queue_pages_range(struct mm_struct *mm, unsigned long start, unsigned long end,
 		.start = start,
 		.end = end,
 		.first = NULL,
+		.last_page = NULL,
 	};
 
 	err = walk_page_range(mm, start, end, &queue_pages_walk_ops, &qp);
