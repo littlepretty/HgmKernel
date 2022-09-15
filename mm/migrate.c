@@ -195,6 +195,9 @@ static bool remove_migration_pte(struct folio *folio,
 		/* pgoff is invalid for ksm pages, but they are never large */
 		if (folio_test_large(folio) && !folio_test_hugetlb(folio))
 			idx = linear_page_index(vma, pvmw.address) - pvmw.pgoff;
+		else if (folio_test_hugetlb(folio))
+			idx = (pvmw.address & ~huge_page_mask(hstate_vma(vma)))/
+				PAGE_SIZE;
 		new = folio_page(folio, idx);
 
 #ifdef CONFIG_ARCH_ENABLE_THP_MIGRATION
@@ -244,14 +247,15 @@ static bool remove_migration_pte(struct folio *folio,
 
 #ifdef CONFIG_HUGETLB_PAGE
 		if (folio_test_hugetlb(folio)) {
+			struct page *hpage = folio_page(folio, 0);
 			unsigned int shift = pvmw.pte_order + PAGE_SHIFT;
 
 			pte = arch_make_huge_pte(pte, shift, vma->vm_flags);
 			if (folio_test_anon(folio))
-				hugepage_add_anon_rmap(new, vma, pvmw.address,
+				hugepage_add_anon_rmap(hpage, vma, pvmw.address,
 						       rmap_flags);
 			else
-				page_dup_file_rmap(new, true);
+				page_dup_file_rmap(hpage, true);
 			set_huge_pte_at(vma->vm_mm, pvmw.address, pvmw.pte, pte);
 		} else
 #endif
@@ -267,7 +271,7 @@ static bool remove_migration_pte(struct folio *folio,
 			mlock_page_drain_local();
 
 		trace_remove_migration_pte(pvmw.address, pte_val(pte),
-					   compound_order(new));
+					   pvmw.pte_order);
 
 		/* No need to invalidate - it was non-present before */
 		update_mmu_cache(vma, pvmw.address, pvmw.pte);
@@ -358,12 +362,10 @@ void __migration_entry_wait_huge(struct vm_area_struct *vma,
 	}
 }
 
-void migration_entry_wait_huge(struct vm_area_struct *vma, pte_t *pte)
+void migration_entry_wait_huge(struct vm_area_struct *vma,
+				struct hugetlb_pte *hpte)
 {
-	spinlock_t *ptl = huge_pte_lockptr(huge_page_shift(hstate_vma(vma)),
-					   vma->vm_mm, pte);
-
-	__migration_entry_wait_huge(vma, pte, ptl);
+	__migration_entry_wait_huge(vma, hpte->ptep, hpte->ptl);
 }
 #endif
 
