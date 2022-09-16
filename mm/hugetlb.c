@@ -5069,9 +5069,9 @@ const struct vm_operations_struct hugetlb_vm_ops = {
 	.pagesize = hugetlb_vm_op_pagesize,
 };
 
-static pte_t make_huge_pte_with_shift(struct vm_area_struct *vma,
-				      struct page *page, int writable,
-				      int shift)
+static pte_t make_huge_pte(struct vm_area_struct *vma,
+			   struct page *page, int writable,
+			   int shift)
 {
 	pte_t entry;
 
@@ -5085,14 +5085,6 @@ static pte_t make_huge_pte_with_shift(struct vm_area_struct *vma,
 	entry = arch_make_huge_pte(entry, shift, vma->vm_flags);
 
 	return entry;
-}
-
-static pte_t make_huge_pte(struct vm_area_struct *vma, struct page *page,
-			   int writable)
-{
-	unsigned int shift = huge_page_shift(hstate_vma(vma));
-
-	return make_huge_pte_with_shift(vma, page, writable, shift);
 }
 
 static void set_huge_ptep_writable(struct vm_area_struct *vma,
@@ -5135,10 +5127,12 @@ static void
 hugetlb_install_page(struct vm_area_struct *vma, pte_t *ptep, unsigned long addr,
 		     struct page *new_page)
 {
+	struct hstate *h = hstate_vma(vma);
 	__SetPageUptodate(new_page);
 	hugepage_add_new_anon_rmap(new_page, vma, addr);
-	set_huge_pte_at(vma->vm_mm, addr, ptep, make_huge_pte(vma, new_page, 1));
-	hugetlb_count_add(pages_per_huge_page(hstate_vma(vma)), vma->vm_mm);
+	set_huge_pte_at(vma->vm_mm, addr, ptep, make_huge_pte(vma, new_page, 1,
+				huge_page_shift(h)));
+	hugetlb_count_add(pages_per_huge_page(h), vma->vm_mm);
 	SetHPageMigratable(new_page);
 }
 
@@ -5854,7 +5848,8 @@ retry_avoidcopy:
 		page_remove_rmap(old_page, vma, true);
 		hugepage_add_new_anon_rmap(new_page, vma, haddr);
 		set_huge_pte_at(mm, haddr, ptep,
-				make_huge_pte(vma, new_page, !unshare));
+				make_huge_pte(vma, new_page, !unshare,
+					huge_page_shift(h)));
 		SetHPageMigratable(new_page);
 		/* Make the old page be freed below */
 		new_page = old_page;
@@ -6165,7 +6160,7 @@ static vm_fault_t hugetlb_no_page(struct mm_struct *mm,
 		page_dup_file_rmap(page, true);
 
 	subpage = hugetlb_find_subpage(h, page, haddr_hgm);
-	new_pte = make_huge_pte_with_shift(vma, subpage,
+	new_pte = make_huge_pte(vma, subpage,
 			((vma->vm_flags & VM_WRITE)
 			 && (vma->vm_flags & VM_SHARED)),
 			hpte->shift);
@@ -6587,8 +6582,7 @@ int hugetlb_mcopy_atomic_pte(struct mm_struct *dst_mm,
 
 	subpage = hugetlb_find_subpage(h, page, dst_addr);
 
-	_dst_pte = make_huge_pte_with_shift(dst_vma, subpage, writable,
-			dst_hpte->shift);
+	_dst_pte = make_huge_pte(dst_vma, subpage, writable, dst_hpte->shift);
 	/*
 	 * Always mark UFFDIO_COPY page dirty; note that this may not be
 	 * extremely important for hugetlbfs for now since swapping is not
@@ -8002,8 +7996,7 @@ int hugetlb_collapse(struct mm_struct *mm, struct vm_area_struct *vma,
 		page_dup_file_rmap(hpage, true);
 
 		subpage = hugetlb_find_subpage(h, hpage, curr);
-		entry = make_huge_pte_with_shift(vma, subpage,
-						 writable, hpte.shift);
+		entry = make_huge_pte(vma, subpage, writable, hpte.shift);
 		set_huge_pte_at(mm, curr, hpte.ptep, entry);
 next_hpte:
 		curr += hugetlb_pte_size(&hpte);
