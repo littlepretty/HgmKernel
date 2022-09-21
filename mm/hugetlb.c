@@ -6750,6 +6750,10 @@ bool want_pmd_share(struct vm_area_struct *vma, unsigned long addr)
 	if (uffd_disable_huge_pmd_share(vma))
 		return false;
 #endif
+#ifdef CONFIG_HUGETLB_HIGH_GRANULARITY_MAPPING
+	if (hugetlb_hgm_enabled(vma))
+		return false;
+#endif
 	return vma_shareable(vma, addr);
 }
 
