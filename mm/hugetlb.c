@@ -92,7 +92,7 @@ struct mutex *hugetlb_fault_mutex_table ____cacheline_aligned_in_smp;
 /* Forward declaration */
 static int hugetlb_acct_memory(struct hstate *h, long delta);
 static void hugetlb_vma_data_free(struct vm_area_struct *vma);
-static int hugetlb_vma_data_alloc(struct vm_area_struct *vma);
+static int hugetlb_vma_data_alloc(struct vm_area_struct *vma, bool force);
 static void __hugetlb_vma_unlock_write_free(struct vm_area_struct *vma);
 
 static inline bool subpool_is_free(struct hugepage_subpool *spool)
@@ -4620,7 +4620,7 @@ static void hugetlb_vm_op_open(struct vm_area_struct *vma)
 	 */
 	if (vma->vm_flags & VM_MAYSHARE) {
 		vma->vm_private_data = NULL;
-		hugetlb_vma_data_alloc(vma);
+		hugetlb_vma_data_alloc(vma, false);
 	}
 }
 
@@ -6595,7 +6595,7 @@ bool hugetlb_reserve_pages(struct inode *inode,
 	/*
 	 * vma specific semaphore used for pmd sharing synchronization
 	 */
-	hugetlb_vma_data_alloc(vma);
+	hugetlb_vma_data_alloc(vma, false);
 
 	/*
 	 * Only apply hugepage reservation if asked. At fault time, an
@@ -6810,6 +6810,10 @@ bool want_pmd_share(struct vm_area_struct *vma, unsigned long addr)
 	if (uffd_disable_huge_pmd_share(vma))
 		return false;
 #endif
+#ifdef CONFIG_HUGETLB_HIGH_GRANULARITY_MAPPING
+	if (hugetlb_hgm_enabled(vma))
+		return false;
+#endif
 	/*
 	 * check on proper vm_flags and page table alignment
 	 */
@@ -6959,7 +6963,7 @@ static void hugetlb_vma_data_free(struct vm_area_struct *vma)
 	}
 }
 
-static int hugetlb_vma_data_alloc(struct vm_area_struct *vma)
+static int hugetlb_vma_data_alloc(struct vm_area_struct *vma, bool force)
 {
 	struct hugetlb_shared_vma_data *data;
 
@@ -7122,7 +7126,7 @@ static void hugetlb_vma_data_free(struct vm_area_struct *vma)
 {
 }
 
-static int hugetlb_vma_data_alloc(struct vm_area_struct *vma)
+static int hugetlb_vma_data_alloc(struct vm_area_struct *vma, bool force)
 {
 	return 0;
 }
@@ -7299,7 +7303,7 @@ int enable_hugetlb_hgm(struct vm_area_struct *vma)
 	mmap_assert_write_locked(vma->vm_mm);
 
 	/* HugeTLB HGM requires the VMA lock to synchronize collapsing. */
-	ret = hugetlb_vma_data_alloc(vma);
+	ret = hugetlb_vma_data_alloc(vma, true);
 	if (ret)
 		return ret;
 
