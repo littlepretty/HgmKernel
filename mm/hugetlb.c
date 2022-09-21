@@ -6812,6 +6812,10 @@ static bool __vma_aligned_range_pmd_shareable(struct vm_area_struct *vma,
 	if (uffd_disable_huge_pmd_share(vma))
 		return false;
 #endif
+#ifdef CONFIG_HUGETLB_HIGH_GRANULARITY_MAPPING
+	if (hugetlb_hgm_enabled(vma))
+		return false;
+#endif
 	/*
 	 * check on proper vm_flags and page table alignment
 	 */
