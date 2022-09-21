@@ -97,7 +97,7 @@ struct mutex *hugetlb_fault_mutex_table ____cacheline_aligned_in_smp;
 /* Forward declaration */
 static int hugetlb_acct_memory(struct hstate *h, long delta);
 static void hugetlb_vma_data_free(struct vm_area_struct *vma);
-static int hugetlb_vma_data_alloc(struct vm_area_struct *vma);
+static int hugetlb_vma_data_alloc(struct vm_area_struct *vma, bool force);
 
 static inline bool subpool_is_free(struct hugepage_subpool *spool)
 {
@@ -4668,7 +4668,7 @@ static void hugetlb_vm_op_open(struct vm_area_struct *vma)
 		kref_get(&resv->refs);
 	}
 
-	hugetlb_vma_data_alloc(vma);
+	hugetlb_vma_data_alloc(vma, false);
 }
 
 static void hugetlb_vm_op_close(struct vm_area_struct *vma)
@@ -6601,7 +6601,7 @@ bool hugetlb_reserve_pages(struct inode *inode,
 	/*
 	 * vma specific semaphore used for pmd sharing synchronization
 	 */
-	hugetlb_vma_data_alloc(vma);
+	hugetlb_vma_data_alloc(vma, false);
 
 	/*
 	 * Only apply hugepage reservation if asked. At fault time, an
@@ -6812,6 +6812,10 @@ static bool __vma_aligned_range_pmd_shareable(struct vm_area_struct *vma,
 	if (uffd_disable_huge_pmd_share(vma))
 		return false;
 #endif
+#ifdef CONFIG_HUGETLB_HIGH_GRANULARITY_MAPPING
+	if (hugetlb_hgm_enabled(vma))
+		return false;
+#endif
 	/*
 	 * check on proper vm_flags and page table alignment
 	 */
@@ -6971,7 +6975,7 @@ static void hugetlb_vma_data_free(struct vm_area_struct *vma)
 	}
 }
 
-static int hugetlb_vma_data_alloc(struct vm_area_struct *vma)
+static int hugetlb_vma_data_alloc(struct vm_area_struct *vma, bool force)
 {
 	struct hugetlb_shared_vma_data *data;
 
@@ -6983,8 +6987,13 @@ static int hugetlb_vma_data_alloc(struct vm_area_struct *vma)
 	if (vma->vm_private_data)
 		return 0;
 
-	/* Check size/alignment for pmd sharing possible */
-	if (!vma_pmd_shareable(vma))
+	/*
+	 * Check size/alignment for pmd sharing possible.
+	 *
+	 * If @force is passed (for enabling HGM), we allow the data to be
+	 * allocated even if PMD sharing isn't possible.
+	 */
+	if (!vma_pmd_shareable(vma) && !force)
 		return 0;
 
 	data = kmalloc(sizeof(*data), GFP_KERNEL);
@@ -7124,7 +7133,7 @@ static void hugetlb_vma_data_free(struct vm_area_struct *vma)
 {
 }
 
-static int hugetlb_vma_data_alloc(struct vm_area_struct *vma)
+static int hugetlb_vma_data_alloc(struct vm_area_struct *vma, bool force)
 {
 	return 0;
 }
@@ -7301,7 +7310,7 @@ int enable_hugetlb_hgm(struct vm_area_struct *vma)
 	mmap_assert_write_locked(vma->vm_mm);
 
 	/* HugeTLB HGM requires the VMA lock to synchronize collapsing. */
-	ret = hugetlb_vma_data_alloc(vma);
+	ret = hugetlb_vma_data_alloc(vma, true);
 	if (ret)
 		return ret;
 
