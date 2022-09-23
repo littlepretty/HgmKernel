@@ -6125,6 +6125,11 @@ vm_fault_t hugetlb_fault(struct mm_struct *mm, struct vm_area_struct *vma,
 		mutex_unlock(&hugetlb_fault_mutex_table[hash]);
 		migration_entry_wait_huge(vma, &hpte);
 		return 0;
+	} else if (unlikely(is_hugetlb_entry_hwpoisoned(entry))) {
+		hugetlb_vma_unlock_read(vma);
+		mutex_unlock(&hugetlb_fault_mutex_table[hash]);
+		return VM_FAULT_HWPOISON_LARGE |
+			VM_FAULT_SET_HINDEX(hstate_index(h));
 	}
 
 	/* PTE markers should be handled the same way as none pte */
