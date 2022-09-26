@@ -226,6 +226,11 @@ static inline struct uffd_msg userfault_msg(unsigned long address,
 	return msg;
 }
 
+bool uffd_ctx_has_hgm(struct vm_userfaultfd_ctx *ctx)
+{
+	return ctx->ctx->features & UFFD_FEATURE_MINOR_HUGETLBFS_HGM;
+}
+
 #ifdef CONFIG_HUGETLB_PAGE
 /*
  * Same functionality as userfaultfd_must_wait below with modifications for
