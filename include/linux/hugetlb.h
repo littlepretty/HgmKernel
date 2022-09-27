@@ -86,6 +86,11 @@ unsigned long hugetlb_pte_mask(const struct hugetlb_pte *hpte)
 
 bool hugetlb_pte_present_leaf(const struct hugetlb_pte *hpte, pte_t pte);
 
+pmd_t *hugetlb_alloc_pmd(struct mm_struct *mm, struct hugetlb_pte *hpte,
+		unsigned long addr);
+pte_t *hugetlb_alloc_pte(struct mm_struct *mm, struct hugetlb_pte *hpte,
+		unsigned long addr);
+
 struct hugepage_subpool {
 	spinlock_t lock;
 	long count;
