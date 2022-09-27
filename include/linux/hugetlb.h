@@ -107,6 +107,11 @@ void hugetlb_pte_copy(struct hugetlb_pte *dest, const struct hugetlb_pte *src)
 
 bool hugetlb_pte_present_leaf(const struct hugetlb_pte *hpte, pte_t pte);
 
+pmd_t *hugetlb_pmd_alloc(struct mm_struct *mm, struct hugetlb_pte *hpte,
+		unsigned long addr);
+pte_t *hugetlb_pte_alloc(struct mm_struct *mm, struct hugetlb_pte *hpte,
+		unsigned long addr);
+
 struct hugepage_subpool {
 	spinlock_t lock;
 	long count;
