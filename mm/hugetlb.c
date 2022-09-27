@@ -341,6 +341,100 @@ static bool has_same_uncharge_info(struct file_region *rg,
 #endif
 }
 
+pmd_t *hugetlb_pmd_alloc(struct mm_struct *mm, struct hugetlb_pte *hpte,
+		unsigned long addr)
+{
+	spinlock_t *ptl = hugetlb_pte_lockptr(mm, hpte);
+	pmd_t *new;
+	pud_t *pudp;
+	pud_t pud;
+
+	if (hpte->level != HUGETLB_LEVEL_PUD)
+		return ERR_PTR(-EINVAL);
+
+	pudp = (pud_t *)hpte->ptep;
+retry:
+	pud = *pudp;
+	if (likely(pud_present(pud)))
+		return unlikely(pud_leaf(pud))
+			? ERR_PTR(-EEXIST)
+			: pmd_offset(pudp, addr);
+	else if (!huge_pte_none(huge_ptep_get(hpte->ptep)))
+		/*
+		 * Not present and not none means that a swap entry lives here,
+		 * and we can't get rid of it.
+		 */
+		return ERR_PTR(-EEXIST);
+
+	new = pmd_alloc_one(mm, addr);
+	if (!new)
+		return ERR_PTR(-ENOMEM);
+
+	spin_lock(ptl);
+	if (!pud_same(pud, *pudp)) {
+		spin_unlock(ptl);
+		pmd_free(mm, new);
+		goto retry;
+	}
+
+	mm_inc_nr_pmds(mm);
+	smp_wmb(); /* See comment in pmd_install() */
+	pud_populate(mm, pudp, new);
+	spin_unlock(ptl);
+	return pmd_offset(pudp, addr);
+}
+
+pte_t *hugetlb_pte_alloc(struct mm_struct *mm, struct hugetlb_pte *hpte,
+		unsigned long addr)
+{
+	spinlock_t *ptl = hugetlb_pte_lockptr(mm, hpte);
+	pgtable_t new;
+	pmd_t *pmdp;
+	pmd_t pmd;
+
+	if (hpte->level != HUGETLB_LEVEL_PMD)
+		return ERR_PTR(-EINVAL);
+
+	pmdp = (pmd_t *)hpte->ptep;
+retry:
+	pmd = *pmdp;
+	if (likely(pmd_present(pmd)))
+		return unlikely(pmd_leaf(pmd))
+			? ERR_PTR(-EEXIST)
+			: pte_offset_kernel(pmdp, addr);
+	else if (!huge_pte_none(huge_ptep_get(hpte->ptep)))
+		/*
+		 * Not present and not none means that a swap entry lives here,
+		 * and we can't get rid of it.
+		 */
+		return ERR_PTR(-EEXIST);
+
+	/*
+	 * With CONFIG_HIGHPTE, calling `pte_alloc_one` directly may result
+	 * in page tables being allocated in high memory, needing a kmap to
+	 * access. Instead, we call __pte_alloc_one directly with
+	 * GFP_PGTABLE_USER to prevent these PTEs being allocated in high
+	 * memory.
+	 */
+	new = __pte_alloc_one(mm, GFP_PGTABLE_USER);
+	if (!new)
+		return ERR_PTR(-ENOMEM);
+
+	spin_lock(ptl);
+	if (!pmd_same(pmd, *pmdp)) {
+		spin_unlock(ptl);
+		pgtable_pte_page_dtor(new);
+		__free_page(new);
+		goto retry;
+	}
+
+	mm_inc_nr_ptes(mm);
+	smp_wmb(); /* See comment in pmd_install() */
+	pmd_populate(mm, pmdp, new);
+	spin_unlock(ptl);
+	return pte_offset_kernel(pmdp, addr);
+}
+
 static void coalesce_file_region(struct resv_map *resv, struct file_region *rg)
 {
 	struct file_region *nrg, *prg;
