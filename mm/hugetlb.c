@@ -482,6 +482,120 @@ static bool has_same_uncharge_info(struct file_region *rg,
 #endif
 }
 
+/*
+ * hugetlb_alloc_pmd -- Allocate or find a PMD beneath a PUD-level hpte.
+ *
+ * This is meant to be used to implement hugetlb_walk_step when one must go to
+ * step down to a PMD. Different architectures may implement hugetlb_walk_step
+ * differently, but hugetlb_alloc_pmd and hugetlb_alloc_pte are architecture-
+ * independent.
+ *
+ * Returns:
+ *	On success: the pointer to the PMD. This should be placed into a
+ *		    hugetlb_pte. @hpte is not changed.
+ *	ERR_PTR(-EINVAL): hpte is not PUD-level
+ *	ERR_PTR(-EEXIST): there is a non-leaf and non-empty PUD in @hpte
+ *	ERR_PTR(-ENOMEM): could not allocate the new PMD
+ */
+pmd_t *hugetlb_alloc_pmd(struct mm_struct *mm, struct hugetlb_pte *hpte,
+		unsigned long addr)
+{
+	spinlock_t *ptl = hugetlb_pte_lockptr(hpte);
+	pmd_t *new;
+	pud_t *pudp;
+	pud_t pud;
+
+	if (hpte->level != HUGETLB_LEVEL_PUD)
+		return ERR_PTR(-EINVAL);
+
+	pudp = (pud_t *)hpte->ptep;
+retry:
+	pud = READ_ONCE(*pudp);
+	if (likely(pud_present(pud)))
+		return unlikely(pud_leaf(pud))
+			? ERR_PTR(-EEXIST)
+			: pmd_offset(pudp, addr);
+	else if (!pud_none(pud))
+		/*
+		 * Not present and not none means that a swap entry lives here,
+		 * and we can't get rid of it.
+		 */
+		return ERR_PTR(-EEXIST);
+
+	new = pmd_alloc_one(mm, addr);
+	if (!new)
+		return ERR_PTR(-ENOMEM);
+
+	spin_lock(ptl);
+	if (!pud_same(pud, *pudp)) {
+		spin_unlock(ptl);
+		pmd_free(mm, new);
+		goto retry;
+	}
+
+	mm_inc_nr_pmds(mm);
+	smp_wmb(); /* See comment in pmd_install() */
+	pud_populate(mm, pudp, new);
+	spin_unlock(ptl);
+	return pmd_offset(pudp, addr);
+}
+
+/*
+ * hugetlb_alloc_pte -- Allocate a PTE beneath a pmd_none PMD-level hpte.
+ *
+ * See the comment above hugetlb_alloc_pmd.
+ */
+pte_t *hugetlb_alloc_pte(struct mm_struct *mm, struct hugetlb_pte *hpte,
+		unsigned long addr)
+{
+	spinlock_t *ptl = hugetlb_pte_lockptr(hpte);
+	pgtable_t new;
+	pmd_t *pmdp;
+	pmd_t pmd;
+
+	if (hpte->level != HUGETLB_LEVEL_PMD)
+		return ERR_PTR(-EINVAL);
+
+	pmdp = (pmd_t *)hpte->ptep;
+retry:
+	pmd = READ_ONCE(*pmdp);
+	if (likely(pmd_present(pmd)))
+		return unlikely(pmd_leaf(pmd))
+			? ERR_PTR(-EEXIST)
+			: pte_offset_kernel(pmdp, addr);
+	else if (!pmd_none(pmd))
+		/*
+		 * Not present and not none means that a swap entry lives here,
+		 * and we can't get rid of it.
+		 */
+		return ERR_PTR(-EEXIST);
+
+	/*
+	 * With CONFIG_HIGHPTE, calling `pte_alloc_one` directly may result
+	 * in page tables being allocated in high memory, needing a kmap to
+	 * access. Instead, we call __pte_alloc_one directly with
+	 * GFP_PGTABLE_USER to prevent these PTEs being allocated in high
+	 * memory.
+	 */
+	new = __pte_alloc_one(mm, GFP_PGTABLE_USER);
+	if (!new)
+		return ERR_PTR(-ENOMEM);
+
+	spin_lock(ptl);
+	if (!pmd_same(pmd, *pmdp)) {
+		spin_unlock(ptl);
+		pgtable_pte_page_dtor(new);
+		__free_page(new);
+		goto retry;
+	}
+
+	mm_inc_nr_ptes(mm);
+	smp_wmb(); /* See comment in pmd_install() */
+	pmd_populate(mm, pmdp, new);
+	spin_unlock(ptl);
+	return pte_offset_kernel(pmdp, addr);
+}
+
 static void coalesce_file_region(struct resv_map *resv, struct file_region *rg)
 {
 	struct file_region *nrg, *prg;
