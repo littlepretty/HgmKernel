@@ -405,6 +405,13 @@ struct mem_size_stats {
 	unsigned long swap;
 	unsigned long shared_hugetlb;
 	unsigned long private_hugetlb;
+#ifdef CONFIG_HUGETLB_HIGH_GRANULARITY_MAPPING
+	/*
+	 * HGM-mapped PTEs can be mapped at any hstate size plus PAGE_SIZE.
+	 * See get_hgm_index().
+	 */
+	unsigned long hugetlb_hgm_mapped[HUGE_MAX_HSTATE + 1];
+#endif
 	u64 pss;
 	u64 pss_anon;
 	u64 pss_file;
@@ -413,6 +420,15 @@ struct mem_size_stats {
 	u64 pss_locked;
 	u64 swap_pss;
 };
+
+#ifdef CONFIG_HUGETLB_HIGH_GRANULARITY_MAPPING
+static int get_hgm_index(unsigned long pagesize)
+{
+	if (pagesize > PAGE_SIZE)
+		return hstate_index(size_to_hstate(pagesize));
+	return HUGE_MAX_HSTATE;
+}
+#endif
 
 static void smaps_page_accumulate(struct mem_size_stats *mss,
 		struct page *page, unsigned long size, unsigned long pss,
@@ -720,6 +736,14 @@ static void show_smap_vma_flags(struct seq_file *m, struct vm_area_struct *vma)
 }
 
 #ifdef CONFIG_HUGETLB_PAGE
+static void smaps_hugetlb_hgm_account(struct mem_size_stats *mss,
+		struct hugetlb_pte *hpte)
+{
+#ifdef CONFIG_HUGETLB_HIGH_GRANULARITY_MAPPING
+	unsigned long size = hugetlb_pte_size(hpte);
+	mss->hugetlb_hgm_mapped[get_hgm_index(size)] += size;
+#endif
+}
 static int smaps_hugetlb_range(struct hugetlb_pte *hpte,
 				unsigned long addr,
 				struct mm_walk *walk)
@@ -753,6 +777,8 @@ static int smaps_hugetlb_range(struct hugetlb_pte *hpte,
 			mss->shared_hugetlb += hugetlb_pte_size(hpte);
 		else
 			mss->private_hugetlb += hugetlb_pte_size(hpte);
+
+		smaps_hugetlb_hgm_account(mss, hpte);
 	}
 	return 0;
 }
@@ -818,10 +844,23 @@ static void smap_gather_stats(struct vm_area_struct *vma,
 #define SEQ_PUT_DEC(str, val) \
 		seq_put_decimal_ull_width(m, str, (val) >> 10, 8)
 
+static void put_hugetlb_hgm_stats(struct seq_file *m,
+		const struct mem_size_stats *mss,
+		unsigned long sz)
+{
+	seq_puts(m, " kB\n");
+	seq_put_decimal_ull(m, "Hugetlb-", sz);
+	SEQ_PUT_DEC("kB_Mapped: ", mss->hugetlb_hgm_mapped[get_hgm_index(sz)]);
+}
+
 /* Show the contents common for smaps and smaps_rollup */
 static void __show_smap(struct seq_file *m, const struct mem_size_stats *mss,
 	bool rollup_mode)
 {
+#ifdef CONFIG_HUGETLB_HIGH_GRANULARITY_MAPPING
+	struct hstate *h;
+#endif
+
 	SEQ_PUT_DEC("Rss:            ", mss->resident);
 	SEQ_PUT_DEC(" kB\nPss:            ", mss->pss >> PSS_SHIFT);
 	SEQ_PUT_DEC(" kB\nPss_Dirty:      ", mss->pss_dirty >> PSS_SHIFT);
@@ -850,6 +889,11 @@ static void __show_smap(struct seq_file *m, const struct mem_size_stats *mss,
 	SEQ_PUT_DEC(" kB\nShared_Hugetlb: ", mss->shared_hugetlb);
 	seq_put_decimal_ull_width(m, " kB\nPrivate_Hugetlb: ",
 				  mss->private_hugetlb >> 10, 7);
+#ifdef CONFIG_HUGETLB_HIGH_GRANULARITY_MAPPING
+	for_each_hstate(h)
+		put_hugetlb_hgm_stats(m, mss, huge_page_size(h));
+	put_hugetlb_hgm_stats(m, mss, PAGE_SIZE);
+#endif
 	SEQ_PUT_DEC(" kB\nSwap:           ", mss->swap);
 	SEQ_PUT_DEC(" kB\nSwapPss:        ",
 					mss->swap_pss >> PSS_SHIFT);
