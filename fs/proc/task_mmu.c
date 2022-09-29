@@ -413,8 +413,14 @@ struct mem_size_stats {
 	unsigned long shared_hugetlb;
 	unsigned long private_hugetlb;
 #ifdef CONFIG_HUGETLB_HIGH_GRANULARITY_MAPPING
-	unsigned long shattered_hugetlb;
+#ifndef __PAGETABLE_PUD_FOLDED
+	unsigned long hugetlb_pud_mapped;
 #endif
+#ifndef __PAGETABLE_PMD_FOLDED
+	unsigned long hugetlb_pmd_mapped;
+#endif
+	unsigned long hugetlb_pte_mapped;
+#endif /* CONFIG_HUGETLB_HIGH_GRANULARITY_MAPPING */
 	u64 pss;
 	u64 pss_anon;
 	u64 pss_file;
@@ -734,6 +740,34 @@ static void show_smap_vma_flags(struct seq_file *m, struct vm_area_struct *vma)
 }
 
 #ifdef CONFIG_HUGETLB_PAGE
+
+#ifdef CONFIG_HUGETLB_HIGH_GRANULARITY_MAPPING
+static void smaps_hugetlb_hgm_account(struct mem_size_stats *mss,
+		struct hugetlb_pte *hpte)
+{
+	unsigned long size = hugetlb_pte_size(hpte);
+
+	switch (hpte->level) {
+#ifndef __PAGETABLE_PUD_FOLDED
+	case HUGETLB_LEVEL_PUD:
+		mss->hugetlb_pud_mapped += size;
+		break;
+#endif
+#ifndef __PAGETABLE_PMD_FOLDED
+	case HUGETLB_LEVEL_PMD:
+		mss->hugetlb_pmd_mapped += size;
+		break;
+#endif
+	case HUGETLB_LEVEL_PTE:
+		mss->hugetlb_pte_mapped += size;
+		break;
+	default:
+		break;
+	}
+	return;
+}
+#endif /* CONFIG_HUGETLB_HIGH_GRANULARITY_MAPPING */
+
 static int smaps_hugetlb_range(struct hugetlb_pte *hpte,
 				unsigned long addr,
 				struct mm_walk *walk)
@@ -764,27 +798,12 @@ static int smaps_hugetlb_range(struct hugetlb_pte *hpte,
 		int mapcount = page_mapcount(page);
 		unsigned long sz = huge_page_size(hstate_vma(vma));
 
-		if (hugetlb_pte_size(hpte) == sz) {
-			if (mapcount >= 2)
-				mss->shared_hugetlb += sz;
-			else
-				mss->private_hugetlb += sz;
-		}
+		if (mapcount >= 2)
+			mss->shared_hugetlb += sz;
+		else
+			mss->private_hugetlb += sz;
 #ifdef CONFIG_HUGETLB_HIGH_GRANULARITY_MAPPING
-		else {
-			/*
-			 * We can't count high-granularity-mapped hugetlb
-			 * mappings as shared or private.
-			 * 
-			 * It's possible that:
-			 *  - a private hugetlb mapping is shattered, yielding
-			 *    mapcount >= 2
-			 *  - a shared hugetlb mapping with mapcount == 1 is
-			 *    shattered, changing from private_hugetlb to
-			 *    shared_hugetlb.
-			 */
-			mss->shattered_hugetlb += hugetlb_pte_size(hpte);
-		}
+		smaps_hugetlb_hgm_account(mss, hpte);
 #endif
 	}
 	return 0;
@@ -855,41 +874,47 @@ static void smap_gather_stats(struct vm_area_struct *vma,
 static void __show_smap(struct seq_file *m, const struct mem_size_stats *mss,
 	bool rollup_mode)
 {
-	SEQ_PUT_DEC("Rss:            ", mss->resident);
-	SEQ_PUT_DEC(" kB\nPss:            ", mss->pss >> PSS_SHIFT);
-	SEQ_PUT_DEC(" kB\nPss_Dirty:      ", mss->pss_dirty >> PSS_SHIFT);
+	SEQ_PUT_DEC("Rss:              ", mss->resident);
+	SEQ_PUT_DEC(" kB\nPss:              ", mss->pss >> PSS_SHIFT);
+	SEQ_PUT_DEC(" kB\nPss_Dirty:        ", mss->pss_dirty >> PSS_SHIFT);
 	if (rollup_mode) {
 		/*
 		 * These are meaningful only for smaps_rollup, otherwise two of
 		 * them are zero, and the other one is the same as Pss.
 		 */
-		SEQ_PUT_DEC(" kB\nPss_Anon:       ",
+		SEQ_PUT_DEC(" kB\nPss_Anon:         ",
 			mss->pss_anon >> PSS_SHIFT);
-		SEQ_PUT_DEC(" kB\nPss_File:       ",
+		SEQ_PUT_DEC(" kB\nPss_File:         ",
 			mss->pss_file >> PSS_SHIFT);
-		SEQ_PUT_DEC(" kB\nPss_Shmem:      ",
+		SEQ_PUT_DEC(" kB\nPss_Shmem:        ",
 			mss->pss_shmem >> PSS_SHIFT);
 	}
-	SEQ_PUT_DEC(" kB\nShared_Clean:   ", mss->shared_clean);
-	SEQ_PUT_DEC(" kB\nShared_Dirty:   ", mss->shared_dirty);
-	SEQ_PUT_DEC(" kB\nPrivate_Clean:  ", mss->private_clean);
-	SEQ_PUT_DEC(" kB\nPrivate_Dirty:  ", mss->private_dirty);
-	SEQ_PUT_DEC(" kB\nReferenced:     ", mss->referenced);
-	SEQ_PUT_DEC(" kB\nAnonymous:      ", mss->anonymous);
-	SEQ_PUT_DEC(" kB\nLazyFree:       ", mss->lazyfree);
-	SEQ_PUT_DEC(" kB\nAnonHugePages:  ", mss->anonymous_thp);
-	SEQ_PUT_DEC(" kB\nShmemPmdMapped: ", mss->shmem_thp);
-	SEQ_PUT_DEC(" kB\nFilePmdMapped:  ", mss->file_thp);
-	SEQ_PUT_DEC(" kB\nShared_Hugetlb: ", mss->shared_hugetlb);
-	seq_put_decimal_ull_width(m, " kB\nPrivate_Hugetlb: ",
+	SEQ_PUT_DEC(" kB\nShared_Clean:     ", mss->shared_clean);
+	SEQ_PUT_DEC(" kB\nShared_Dirty:     ", mss->shared_dirty);
+	SEQ_PUT_DEC(" kB\nPrivate_Clean:    ", mss->private_clean);
+	SEQ_PUT_DEC(" kB\nPrivate_Dirty:    ", mss->private_dirty);
+	SEQ_PUT_DEC(" kB\nReferenced:       ", mss->referenced);
+	SEQ_PUT_DEC(" kB\nAnonymous:        ", mss->anonymous);
+	SEQ_PUT_DEC(" kB\nLazyFree:         ", mss->lazyfree);
+	SEQ_PUT_DEC(" kB\nAnonHugePages:    ", mss->anonymous_thp);
+	SEQ_PUT_DEC(" kB\nShmemPmdMapped:   ", mss->shmem_thp);
+	SEQ_PUT_DEC(" kB\nFilePmdMapped:    ", mss->file_thp);
+	SEQ_PUT_DEC(" kB\nShared_Hugetlb:   ", mss->shared_hugetlb);
+	seq_put_decimal_ull_width(m, " kB\nPrivate_Hugetlb:   ",
 				  mss->private_hugetlb >> 10, 7);
 #ifdef CONFIG_HUGETLB_HIGH_GRANULARITY_MAPPING
-	SEQ_PUT_DEC(" kB\nSmall_Hugetlb:  ", mss->shattered_hugetlb);
+#ifndef __PAGETABLE_PUD_FOLDED
+	SEQ_PUT_DEC(" kB\nHugetlbPudMapped: ", mss->hugetlb_pud_mapped);
 #endif
-	SEQ_PUT_DEC(" kB\nSwap:           ", mss->swap);
-	SEQ_PUT_DEC(" kB\nSwapPss:        ",
+#ifndef __PAGETABLE_PMD_FOLDED
+	SEQ_PUT_DEC(" kB\nHugetlbPmdMapped: ", mss->hugetlb_pmd_mapped);
+#endif
+	SEQ_PUT_DEC(" kB\nHugetlbPteMapped: ", mss->hugetlb_pte_mapped);
+#endif /* CONFIG_HUGETLB_HIGH_GRANULARITY_MAPPING */
+	SEQ_PUT_DEC(" kB\nSwap:             ", mss->swap);
+	SEQ_PUT_DEC(" kB\nSwapPss:          ",
 					mss->swap_pss >> PSS_SHIFT);
-	SEQ_PUT_DEC(" kB\nLocked:         ",
+	SEQ_PUT_DEC(" kB\nLocked:           ",
 					mss->pss_locked >> PSS_SHIFT);
 	seq_puts(m, " kB\n");
 }
@@ -905,18 +930,18 @@ static int show_smap(struct seq_file *m, void *v)
 
 	show_map_vma(m, vma);
 
-	SEQ_PUT_DEC("Size:           ", vma->vm_end - vma->vm_start);
-	SEQ_PUT_DEC(" kB\nKernelPageSize: ", vma_kernel_pagesize(vma));
-	SEQ_PUT_DEC(" kB\nMMUPageSize:    ", vma_mmu_pagesize(vma));
+	SEQ_PUT_DEC("Size:             ", vma->vm_end - vma->vm_start);
+	SEQ_PUT_DEC(" kB\nKernelPageSize:   ", vma_kernel_pagesize(vma));
+	SEQ_PUT_DEC(" kB\nMMUPageSize:      ", vma_mmu_pagesize(vma));
 	seq_puts(m, " kB\n");
 
 	__show_smap(m, &mss, false);
 
-	seq_printf(m, "THPeligible:    %d\n",
+	seq_printf(m, "THPeligible:      %d\n",
 		   hugepage_vma_check(vma, vma->vm_flags, true, false, true));
 
 	if (arch_pkeys_enabled())
-		seq_printf(m, "ProtectionKey:  %8u\n", vma_pkey(vma));
+		seq_printf(m, "ProtectionKey:    %8u\n", vma_pkey(vma));
 	show_smap_vma_flags(m, vma);
 
 	return 0;
