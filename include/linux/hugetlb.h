@@ -109,6 +109,10 @@ struct hugetlb_vma_lock {
 	struct vm_area_struct *vma;
 };
 
+struct hugetlb_shared_vma_data {
+	struct hugetlb_vma_lock vma_lock;
+};
+
 extern struct resv_map *resv_map_alloc(void);
 void resv_map_release(struct kref *ref);
 
