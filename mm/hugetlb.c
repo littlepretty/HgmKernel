@@ -92,7 +92,7 @@ struct mutex *hugetlb_fault_mutex_table ____cacheline_aligned_in_smp;
 /* Forward declaration */
 static int hugetlb_acct_memory(struct hstate *h, long delta);
 static void hugetlb_vma_lock_free(struct vm_area_struct *vma);
-static void hugetlb_vma_lock_alloc(struct vm_area_struct *vma);
+static int hugetlb_vma_lock_alloc(struct vm_area_struct *vma);
 static void __hugetlb_vma_unlock_write_free(struct vm_area_struct *vma);
 
 static inline bool subpool_is_free(struct hugepage_subpool *spool)
@@ -6978,17 +6978,17 @@ static void hugetlb_vma_lock_free(struct vm_area_struct *vma)
 	}
 }
 
-static void hugetlb_vma_lock_alloc(struct vm_area_struct *vma)
+static int hugetlb_vma_lock_alloc(struct vm_area_struct *vma)
 {
 	struct hugetlb_vma_lock *vma_lock;
 
 	/* Only establish in (flags) sharable vmas */
 	if (!vma || !(vma->vm_flags & VM_MAYSHARE))
-		return;
+		return -EINVAL;
 
-	/* Should never get here with non-NULL vm_private_data */
+	/* We've already allocated the lock. */
 	if (vma->vm_private_data)
-		return;
+		return 0;
 
 	vma_lock = kmalloc(sizeof(*vma_lock), GFP_KERNEL);
 	if (!vma_lock) {
@@ -7003,13 +7003,14 @@ static void hugetlb_vma_lock_alloc(struct vm_area_struct *vma)
 		 * allocation failure.
 		 */
 		pr_warn_once("HugeTLB: unable to allocate vma specific lock\n");
-		return;
+		return -ENOMEM;
 	}
 
 	kref_init(&vma_lock->refs);
 	init_rwsem(&vma_lock->rw_sema);
 	vma_lock->vma = vma;
 	vma->vm_private_data = vma_lock;
+	return 0;
 }
 
 /*
@@ -7137,8 +7138,9 @@ static void hugetlb_vma_lock_free(struct vm_area_struct *vma)
 {
 }
 
-static void hugetlb_vma_lock_alloc(struct vm_area_struct *vma)
+static int hugetlb_vma_lock_alloc(struct vm_area_struct *vma)
 {
+	return 0;
 }
 
 pte_t *huge_pmd_share(struct mm_struct *mm, struct vm_area_struct *vma,
