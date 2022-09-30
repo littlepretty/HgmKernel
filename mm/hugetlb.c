@@ -91,8 +91,8 @@ struct mutex *hugetlb_fault_mutex_table ____cacheline_aligned_in_smp;
 
 /* Forward declaration */
 static int hugetlb_acct_memory(struct hstate *h, long delta);
-static void hugetlb_vma_lock_free(struct vm_area_struct *vma);
-static void hugetlb_vma_lock_alloc(struct vm_area_struct *vma);
+static void hugetlb_vma_data_free(struct vm_area_struct *vma);
+static int hugetlb_vma_data_alloc(struct vm_area_struct *vma);
 
 static inline bool subpool_is_free(struct hugepage_subpool *spool)
 {
@@ -4612,7 +4612,7 @@ static void hugetlb_vm_op_open(struct vm_area_struct *vma)
 		kref_get(&resv->refs);
 	}
 
-	hugetlb_vma_lock_alloc(vma);
+	hugetlb_vma_data_alloc(vma);
 }
 
 static void hugetlb_vm_op_close(struct vm_area_struct *vma)
@@ -4623,7 +4623,7 @@ static void hugetlb_vm_op_close(struct vm_area_struct *vma)
 	unsigned long reserve, start, end;
 	long gbl_reserve;
 
-	hugetlb_vma_lock_free(vma);
+	hugetlb_vma_data_free(vma);
 
 	resv = vma_resv_map(vma);
 	if (!resv || !is_vma_resv_set(vma, HPAGE_RESV_OWNER))
@@ -6536,7 +6536,7 @@ bool hugetlb_reserve_pages(struct inode *inode,
 	/*
 	 * vma specific semaphore used for pmd sharing synchronization
 	 */
-	hugetlb_vma_lock_alloc(vma);
+	hugetlb_vma_data_alloc(vma);
 
 	/*
 	 * Only apply hugepage reservation if asked. At fault time, an
@@ -6660,7 +6660,7 @@ out_uncharge_cgroup:
 	hugetlb_cgroup_uncharge_cgroup_rsvd(hstate_index(h),
 					    chg * pages_per_huge_page(h), h_cg);
 out_err:
-	hugetlb_vma_lock_free(vma);
+	hugetlb_vma_data_free(vma);
 	if (!vma || vma->vm_flags & VM_MAYSHARE)
 		/* Only call region_abort if the region_chg succeeded but the
 		 * region_add failed or didn't run.
@@ -6820,55 +6820,55 @@ static bool __vma_shareable_flags_pmd(struct vm_area_struct *vma)
 void hugetlb_vma_lock_read(struct vm_area_struct *vma)
 {
 	if (__vma_shareable_flags_pmd(vma)) {
-		struct hugetlb_vma_lock *vma_lock = vma->vm_private_data;
+		struct hugetlb_shared_vma_data *data = vma->vm_private_data;
 
-		down_read(&vma_lock->rw_sema);
+		down_read(&data->vma_lock.rw_sema);
 	}
 }
 
 void hugetlb_vma_unlock_read(struct vm_area_struct *vma)
 {
 	if (__vma_shareable_flags_pmd(vma)) {
-		struct hugetlb_vma_lock *vma_lock = vma->vm_private_data;
+		struct hugetlb_shared_vma_data *data = vma->vm_private_data;
 
-		up_read(&vma_lock->rw_sema);
+		up_read(&data->vma_lock.rw_sema);
 	}
 }
 
 void hugetlb_vma_lock_write(struct vm_area_struct *vma)
 {
 	if (__vma_shareable_flags_pmd(vma)) {
-		struct hugetlb_vma_lock *vma_lock = vma->vm_private_data;
+		struct hugetlb_shared_vma_data *data = vma->vm_private_data;
 
-		down_write(&vma_lock->rw_sema);
+		down_write(&data->vma_lock.rw_sema);
 	}
 }
 
 void hugetlb_vma_unlock_write(struct vm_area_struct *vma)
 {
 	if (__vma_shareable_flags_pmd(vma)) {
-		struct hugetlb_vma_lock *vma_lock = vma->vm_private_data;
+		struct hugetlb_shared_vma_data *data = vma->vm_private_data;
 
-		up_write(&vma_lock->rw_sema);
+		up_write(&data->vma_lock.rw_sema);
 	}
 }
 
 int hugetlb_vma_trylock_write(struct vm_area_struct *vma)
 {
-	struct hugetlb_vma_lock *vma_lock = vma->vm_private_data;
+	struct hugetlb_shared_vma_data *data = vma->vm_private_data;
 
 	if (!__vma_shareable_flags_pmd(vma))
 		return 1;
 
-	return down_write_trylock(&vma_lock->rw_sema);
+	return down_write_trylock(&data->vma_lock.rw_sema);
 }
 
 void hugetlb_vma_assert_locked(struct vm_area_struct *vma)
 {
 	if (__vma_shareable_flags_pmd(vma)) {
-		struct hugetlb_vma_lock *vma_lock = vma->vm_private_data;
+		struct hugetlb_shared_vma_data *data = vma->vm_private_data;
 
-		lockdep_assert_held(&vma_lock->rw_sema);
+		lockdep_assert_held(&data->vma_lock.rw_sema);
 	}
 }
 
@@ -6880,7 +6880,7 @@ void hugetlb_vma_lock_release(struct kref *kref)
 	kfree(vma_lock);
 }
 
-static void hugetlb_vma_lock_free(struct vm_area_struct *vma)
+static void hugetlb_vma_data_free(struct vm_area_struct *vma)
 {
 	/*
 	 * Only present in sharable vmas.  See comment in
@@ -6892,7 +6892,8 @@ static void hugetlb_vma_lock_free(struct vm_area_struct *vma)
 		return;
 
 	if (vma->vm_private_data) {
-		struct hugetlb_vma_lock *vma_lock = vma->vm_private_data;
+		struct hugetlb_shared_vma_data *data = vma->vm_private_data;
+		struct hugetlb_vma_lock *vma_lock = &data->vma_lock;
 
 		/*
 		 * vma_lock structure may or not be released, but it
@@ -6905,9 +6906,9 @@ static void hugetlb_vma_lock_free(struct vm_area_struct *vma)
 	}
 }
 
-static int hugetlb_vma_lock_alloc(struct vm_area_struct *vma)
+static int hugetlb_vma_data_alloc(struct vm_area_struct *vma)
 {
-	struct hugetlb_vma_lock *vma_lock;
+	struct hugetlb_shared_vma_data *data;
 
 	/* Only establish in (flags) sharable vmas */
 	if (!vma || !(vma->vm_flags & VM_MAYSHARE))
@@ -6921,18 +6922,18 @@ static int hugetlb_vma_lock_alloc(struct vm_area_struct *vma)
 	if (!vma_pmd_shareable(vma))
 		return 0;
 
-	vma_lock = kmalloc(sizeof(*vma_lock), GFP_KERNEL);
-	if (!vma_lock)
+	data = kmalloc(sizeof(*data), GFP_KERNEL);
+	if (!data)
 		/*
 		 * If we can not allocate structure, then vma can not
 		 * participate in pmd sharing.
 		 */
 		return -ENOMEM;
 
-	kref_init(&vma_lock->refs);
-	init_rwsem(&vma_lock->rw_sema);
-	vma_lock->vma = vma;
-	vma->vm_private_data = vma_lock;
+	kref_init(&data->vma_lock.refs);
+	init_rwsem(&data->vma_lock.rw_sema);
+	data->vma_lock.vma = vma;
+	vma->vm_private_data = data;
 	return 0;
 }
 
@@ -7053,11 +7054,11 @@ void hugetlb_vma_lock_release(struct kref *kref)
 {
 }
 
-static void hugetlb_vma_lock_free(struct vm_area_struct *vma)
+static void hugetlb_vma_data_free(struct vm_area_struct *vma)
 {
 }
 
-static int hugetlb_vma_lock_alloc(struct vm_area_struct *vma)
+static int hugetlb_vma_data_alloc(struct vm_area_struct *vma)
 {
 	return 0;
 }
