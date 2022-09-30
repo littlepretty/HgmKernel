@@ -508,17 +508,13 @@ vm_fault_t handle_userfault(struct vm_fault *vmf, unsigned long reason)
 
 	blocking_state = userfaultfd_get_blocking_state(vmf->flags);
 
-	if (is_vm_hugetlb_page(vmf->vma) && hugetlb_hgm_eligible(vmf->vma)) {
+	if (is_vm_hugetlb_page(vmf->vma) && hugetlb_hgm_eligible(vmf->vma))
 		/*
 		 * Lock the mapping so we can do a high-granularity walk in
 		 * userfaultfd_huge_must_wait. We have to grab this lock before
 		 * we set our state to blocking.
 		 */
-		mapping = vmf->vma->vm_file->f_mapping;
-		if (!hugetlb_vma_lock_alloc(vmf->vma))
-			return VM_FAULT_OOM;
 		hugetlb_vma_lock_read(vmf->vma);
-	}
 
 	spin_lock_irq(&ctx->fault_pending_wqh.lock);
 	/*
@@ -1489,16 +1485,11 @@ static int userfaultfd_register(struct userfaultfd_ctx *ctx,
 		}
 	next:
 		if (is_vm_hugetlb_page(vma) && hugetlb_hgm_eligible(vma)) {
-			bool ctx_hgm = ctx->features &
-				UFFD_FEATURE_MINOR_HUGETLBFS_HGM;
-			if (ctx_hgm) {
-				if (!hugetlb_vma_lock_alloc(vma)) {
-					ret = -ENOMEM;
+			if (ctx->features &
+				UFFD_FEATURE_MINOR_HUGETLBFS_HGM) {
+				ret = enable_hugetlb_hgm(vma);
+				if (ret)
 					break;
-				}
-				hugetlb_vma_lock_write(vma);
-				enable_hugetlb_hgm(vma);
-				hugetlb_vma_unlock_write(vma);
 			}
 		}
 		/*
