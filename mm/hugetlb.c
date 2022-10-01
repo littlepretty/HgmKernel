@@ -5803,7 +5803,7 @@ static vm_fault_t hugetlb_no_page(struct mm_struct *mm,
 	 * before we get page_table_lock.
 	 */
 	new_page = false;
-	page = find_lock_page(mapping, idx);
+	page = find_get_page(mapping, idx);
 	if (!page) {
 		size = i_size_read(mapping->host) >> huge_page_shift(h);
 		if (idx >= size)
@@ -5871,16 +5871,22 @@ static vm_fault_t hugetlb_no_page(struct mm_struct *mm,
 		if (unlikely(PageHWPoison(page))) {
 			ret = VM_FAULT_HWPOISON_LARGE |
 				VM_FAULT_SET_HINDEX(hstate_index(h));
-			goto backout_unlocked;
+			goto out_put;
 		}
 
 		/* Check for page in userfault range. */
 		if (userfaultfd_minor(vma)) {
-			unlock_page(page);
 			put_page(page);
 			return hugetlb_handle_userfault(vma, mapping, idx,
 						       flags, haddr, address,
 						       VM_UFFD_MINOR);
+		}
+
+		lock_page(page);
+		size = i_size_read(mapping->host) >> huge_page_shift(h);
+		if (idx >= size) {
+			unlock_page(page);
+			goto out_put;
 		}
 	}
 
@@ -5954,6 +5960,7 @@ backout_unlocked:
 		restore_reserve_on_error(h, vma, haddr, page);
 
 	unlock_page(page);
+out_put:
 	put_page(page);
 	goto out;
 }
