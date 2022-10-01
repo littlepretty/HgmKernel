@@ -93,6 +93,38 @@ static inline pte_t huge_ptep_clear_flush(struct vm_area_struct *vma,
 }
 #endif
 
+#ifndef __HAVE_ARCH_HUGETLB_PTE_CLEAR
+static inline void hugetlb_pte_clear(struct mm_struct *mm, unsigned long addr,
+		    const struct hugetlb_pte *hpte)
+{
+	huge_pte_clear(mm, addr, hpte->ptep, hugetlb_pte_size(hpte));
+}
+#endif
+
+#ifndef __HAVE_ARCH_HUGE_SET_HUGETLB_PTE_AT
+static inline void set_hugetlb_pte_at(struct mm_struct *mm, unsigned long addr,
+		const struct hugetlb_pte *hpte, pte_t pte)
+{
+	set_huge_pte_at(mm, addr, hpte->ptep, pte);
+}
+#endif
+
+#ifndef __HAVE_ARCH_HUGETLB_PTE_GET_AND_CLEAR
+static inline pte_t hugetlb_pte_get_and_clear(struct mm_struct *mm,
+		unsigned long addr, const struct hugetlb_pte *hpte)
+{
+	return huge_ptep_get_and_clear(mm, addr, hpte->ptep);
+}
+#endif
+
+#ifndef __HAVE_ARCH_HUGETLB_PTE_CLEAR_FLUSH
+static inline pte_t hugetlb_pte_clear_flush(struct vm_area_struct *vma,
+		unsigned long addr, struct hugetlb_pte *hpte)
+{
+	return huge_ptep_clear_flush(vma, addr, hpte->ptep);
+}
+#endif
+
 #ifndef __HAVE_ARCH_HUGE_PTE_NONE
 static inline int huge_pte_none(pte_t pte)
 {
@@ -138,10 +170,34 @@ static inline int huge_ptep_set_access_flags(struct vm_area_struct *vma,
 }
 #endif
 
+#ifndef __HAVE_ARCH_HUGETLB_PTE_SET_WRPROTECT
+static inline void hugetlb_pte_set_wrprotect(struct mm_struct *mm,
+		unsigned long addr, const struct hugetlb_pte *hpte)
+{
+	huge_ptep_set_wrprotect(mm, addr, hpte->ptep);
+}
+#endif
+
+#ifndef __HAVE_ARCH_HUGETLB_PTE_SET_ACCESS_FLAGS
+static inline int hugetlb_pte_set_access_flags(struct vm_area_struct *vma,
+		unsigned long addr, const struct hugetlb_pte *hpte,
+		pte_t pte, int dirty)
+{
+	return huge_ptep_set_access_flags(vma, addr, hpte->ptep, pte, dirty);
+}
+#endif
+
 #ifndef __HAVE_ARCH_HUGE_PTEP_GET
 static inline pte_t huge_ptep_get(pte_t *ptep)
 {
 	return ptep_get(ptep);
+}
+#endif
+
+#ifndef __HAVE_ARCH_HUGETLB_PTE_GET
+static inline pte_t hugetlb_pte_get(const struct hugetlb_pte *hpte)
+{
+	return huge_ptep_get(hpte->ptep);
 }
 #endif
 
