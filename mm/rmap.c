@@ -1465,6 +1465,16 @@ out:
 	munlock_vma_page(page, vma, compound);
 }
 
+static void set_hugetlb_pte_pvmw(struct mm_struct *mm, unsigned long addr,
+		struct page_vma_mapped_walk *pvmw, pte_t pteval)
+{
+	struct hugetlb_pte hpte;
+	unsigned int shift = PAGE_SHIFT + pvmw->pte_order;
+	hugetlb_pte_populate(&hpte, pvmw->pte, shift,
+			hpage_size_to_level(1UL << shift));
+	set_hugetlb_pte_at(mm, addr, &hpte, pteval);
+}
+
 /*
  * @arg: enum ttu_flags will be passed to this argument
  */
@@ -1648,7 +1658,7 @@ static bool try_to_unmap_one(struct folio *folio, struct vm_area_struct *vma,
 			pteval = swp_entry_to_pte(make_hwpoison_entry(subpage));
 			if (folio_test_hugetlb(folio)) {
 				hugetlb_count_sub(1UL << pvmw.pte_order, mm);
-				set_huge_pte_at(mm, address, pvmw.pte, pteval);
+				set_hugetlb_pte_pvmw(mm, address, &pvmw, pteval);
 			} else {
 				dec_mm_counter(mm, mm_counter(&folio->page));
 				set_pte_at(mm, address, pvmw.pte, pteval);
@@ -2080,7 +2090,7 @@ static bool try_to_migrate_one(struct folio *folio, struct vm_area_struct *vma,
 			pteval = swp_entry_to_pte(make_hwpoison_entry(subpage));
 			if (folio_test_hugetlb(folio)) {
 				hugetlb_count_sub(1L << pvmw.pte_order, mm);
-				set_huge_pte_at(mm, address, pvmw.pte, pteval);
+				set_hugetlb_pte_pvmw(mm, address, &pvmw, pteval);
 			} else {
 				dec_mm_counter(mm, mm_counter(&folio->page));
 				set_pte_at(mm, address, pvmw.pte, pteval);
@@ -2107,7 +2117,7 @@ static bool try_to_migrate_one(struct folio *folio, struct vm_area_struct *vma,
 
 			if (arch_unmap_one(mm, vma, address, pteval) < 0) {
 				if (folio_test_hugetlb(folio))
-					set_huge_pte_at(mm, address, pvmw.pte, pteval);
+					set_hugetlb_pte_pvmw(mm, address, &pvmw, pteval);
 				else
 					set_pte_at(mm, address, pvmw.pte, pteval);
 				ret = false;
@@ -2121,7 +2131,7 @@ static bool try_to_migrate_one(struct folio *folio, struct vm_area_struct *vma,
 			if (anon_exclusive &&
 			    page_try_share_anon_rmap(subpage)) {
 				if (folio_test_hugetlb(folio))
-					set_huge_pte_at(mm, address, pvmw.pte, pteval);
+					set_hugetlb_pte_pvmw(mm, address, &pvmw, pteval);
 				else
 					set_pte_at(mm, address, pvmw.pte, pteval);
 				ret = false;
@@ -2153,7 +2163,7 @@ static bool try_to_migrate_one(struct folio *folio, struct vm_area_struct *vma,
 			if (pte_uffd_wp(pteval))
 				swp_pte = pte_swp_mkuffd_wp(swp_pte);
 			if (folio_test_hugetlb(folio))
-				set_huge_pte_at(mm, address, pvmw.pte, swp_pte);
+				set_hugetlb_pte_pvmw(mm, address, &pvmw, swp_pte);
 			else
 				set_pte_at(mm, address, pvmw.pte, swp_pte);
 			trace_set_migration_pte(address, pte_val(swp_pte),
