@@ -5386,8 +5386,7 @@ static void __unmap_hugepage_range(struct mmu_gather *tlb, struct vm_area_struct
 				set_huge_pte_at(mm, address, hpte.ptep,
 						make_pte_marker(PTE_MARKER_UFFD_WP));
 			else
-				huge_pte_clear(mm, address, hpte.ptep,
-						hugetlb_pte_size(&hpte));
+				hugetlb_pte_clear(mm, address, &hpte);
 			spin_unlock(ptl);
 			goto next_hpte;
 		}
@@ -6928,8 +6927,7 @@ unsigned long hugetlb_change_protection(struct vm_area_struct *vma,
 			 * no need for huge_ptep_modify_prot_start/commit().
 			 */
 			if (uffd_wp_resolve)
-				huge_pte_clear(mm, address, hpte.ptep,
-						hugetlb_pte_size(&hpte));
+				hugetlb_pte_clear(mm, address, &hpte);
 		}
 		if (!huge_pte_none(pte)) {
 			pte_t old_pte;
@@ -8017,8 +8015,7 @@ int hugetlb_collapse(struct mm_struct *mm, struct vm_area_struct *vma,
 				curr, curr + hugetlb_pte_size(&hpte),
 				curr, curr + hugetlb_pte_size(&hpte));
 		if (!hpage) {
-			huge_pte_clear(mm, curr, hpte.ptep,
-					hugetlb_pte_size(&hpte));
+			hugetlb_pte_clear(mm, curr, &hpte);
 			goto next_hpte;
 		}
 
