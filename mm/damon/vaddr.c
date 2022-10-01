@@ -368,7 +368,7 @@ static int damon_mkold_hugetlb_entry(struct hugetlb_pte *hpte,
 	pte_t entry;
 
 	ptl = hugetlb_pte_lock(walk->mm, hpte);
-	entry = huge_ptep_get(hpte->ptep);
+	entry = hugetlb_pte_get(hpte);
 	if (!pte_present(entry))
 		goto out;
 
@@ -499,7 +499,7 @@ static int damon_young_hugetlb_entry(struct hugetlb_pte *hpte,
 	pte_t entry;
 
 	ptl = huge_pte_lock_shift(hpte->shift, walk->mm, hpte->ptep);
-	entry = huge_ptep_get(pte);
+	entry = hugetlb_pte_get(hpte);
 	if (!pte_present(entry))
 		goto out;
 
