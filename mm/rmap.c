@@ -1537,6 +1537,8 @@ static bool try_to_unmap_one(struct folio *folio, struct vm_area_struct *vma,
 
 		if (folio_test_hugetlb(folio)) {
 			bool anon = folio_test_anon(folio);
+			struct hugetlb_pte hpte;
+			unsigned long sz = PAGE_SIZE << pvmw.pte_order;
 
 			/*
 			 * The try_to_unmap() is only passed a hugetlb page
@@ -1590,7 +1592,10 @@ static bool try_to_unmap_one(struct folio *folio, struct vm_area_struct *vma,
 				}
 				hugetlb_vma_unlock_write(vma);
 			}
-			pteval = huge_ptep_clear_flush(vma, address, pvmw.pte);
+			__hugetlb_pte_populate(&hpte, pvmw.pte,
+					pvmw.pte_order + PAGE_SHIFT,
+					hpage_size_to_level(sz), pvmw.ptl);
+			pteval = hugetlb_pte_clear_flush(vma, address, &hpte);
 		} else {
 			flush_cache_page(vma, address, pte_pfn(*pvmw.pte));
 			/* Nuke the page table entry. */
@@ -1945,6 +1950,8 @@ static bool try_to_migrate_one(struct folio *folio, struct vm_area_struct *vma,
 
 		if (folio_test_hugetlb(folio)) {
 			bool anon = folio_test_anon(folio);
+			struct hugetlb_pte hpte;
+			unsigned long sz = PAGE_SIZE << pvmw.pte_order;
 
 			/*
 			 * huge_pmd_unshare may unmap an entire PMD page.
@@ -1995,7 +2002,10 @@ static bool try_to_migrate_one(struct folio *folio, struct vm_area_struct *vma,
 				hugetlb_vma_unlock_write(vma);
 			}
 			/* Nuke the hugetlb page table entry */
-			pteval = huge_ptep_clear_flush(vma, address, pvmw.pte);
+			__hugetlb_pte_populate(&hpte, pvmw.pte,
+					pvmw.pte_order + PAGE_SHIFT,
+					hpage_size_to_level(sz), pvmw.ptl);
+			pteval = hugetlb_pte_clear_flush(vma, address, &hpte);
 		} else {
 			flush_cache_page(vma, address, pte_pfn(*pvmw.pte));
 			/* Nuke the page table entry. */
