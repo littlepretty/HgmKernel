@@ -576,7 +576,7 @@ static int queue_pages_hugetlb(struct hugetlb_pte *hpte,
 	pte_t entry;
 
 	ptl = hugetlb_pte_lock(walk->mm, hpte);
-	entry = huge_ptep_get(hpte->ptep);
+	entry = hugetlb_pte_get(hpte);
 	if (!pte_present(entry))
 		goto unlock;
 

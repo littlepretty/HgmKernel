@@ -5686,7 +5686,7 @@ retry_avoidcopy:
 			if (likely(ptep)) {
 				hugetlb_pte_populate(&new_hpte, ptep, huge_page_shift(h),
 						hpage_size_to_level(huge_page_size(h)));
-				if (likely(pte_same(hugetlb_pte_get(ptep), pte)))
+				if (likely(pte_same(hugetlb_pte_get(&new_hpte), pte)))
 					goto retry_avoidcopy;
 			}
 			/*

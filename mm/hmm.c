@@ -487,7 +487,7 @@ static int hmm_vma_walk_hugetlb_entry(struct hugetlb_pte *hpte,
 	pte_t entry;
 
 	ptl = hugetlb_pte_lock(walk->mm, hpte);
-	entry = huge_ptep_get(hpte->ptep);
+	entry = hugetlb_pte_get(hpte);
 
 	if (!hugetlb_pte_present_leaf(hpte, entry)) {
 		spin_unlock(ptl);

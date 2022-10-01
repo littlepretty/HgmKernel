@@ -257,10 +257,9 @@ static inline bool userfaultfd_huge_must_wait(struct userfaultfd_ctx *ctx,
 	hugetlb_pte_populate(&hpte, ptep, shift, hpage_size_to_level(sz));
 	hugetlb_hgm_walk(vma->vm_mm, vma, &hpte, address, PAGE_SIZE,
 			/*stop_at_none=*/true);
-	ptep = hpte.ptep;
 
 	ret = false;
-	pte = huge_ptep_get(ptep);
+	pte = hugetlb_pte_get(&hpte);
 
 	/*
 	 * Lockless access: we're in a wait_event so it's ok if it
