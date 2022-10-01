@@ -5090,13 +5090,14 @@ static pte_t make_huge_pte(struct vm_area_struct *vma,
 }
 
 static void set_huge_ptep_writable(struct vm_area_struct *vma,
-				   unsigned long address, pte_t *ptep)
+				   unsigned long address,
+				   struct hugetlb_pte *hpte)
 {
 	pte_t entry;
 
-	entry = huge_pte_mkwrite(huge_pte_mkdirty(huge_ptep_get(ptep)));
-	if (huge_ptep_set_access_flags(vma, address, ptep, entry, 1))
-		update_mmu_cache(vma, address, ptep);
+	entry = huge_pte_mkwrite(huge_pte_mkdirty(hugetlb_pte_get(hpte)));
+	if (huge_ptep_set_access_flags(vma, address, hpte->ptep, entry, 1))
+		update_mmu_cache(vma, address, hpte->ptep);
 }
 
 bool is_hugetlb_entry_migration(pte_t pte)
@@ -5216,7 +5217,7 @@ int copy_hugetlb_page_range(struct mm_struct *dst, struct mm_struct *src,
 		dst_ptl = hugetlb_pte_lock(&dst_hpte);
 		src_ptl = hugetlb_pte_lockptr(&src_hpte);
 		spin_lock_nested(src_ptl, SINGLE_DEPTH_NESTING);
-		entry = huge_ptep_get(src_pte);
+		entry = hugetlb_pte_get(&src_hpte);
 again:
 		if (huge_pte_none(entry)) {
 			/*
@@ -5308,7 +5309,7 @@ again:
 				dst_ptl = hugetlb_pte_lock(&dst_hpte);
 				src_ptl = hugetlb_pte_lockptr(&src_hpte);
 				spin_lock_nested(src_ptl, SINGLE_DEPTH_NESTING);
-				entry = huge_ptep_get(src_pte);
+				entry = hugetlb_pte_get(&src_hpte);
 				if (!pte_same(src_pte_old, entry)) {
 					restore_reserve_on_error(h, dst_vma, addr,
 								new);
@@ -5418,7 +5419,7 @@ int move_hugetlb_page_tables(struct vm_area_struct *vma,
 			continue;
 		}
 
-		if (huge_pte_none(huge_ptep_get(src_hpte.ptep))) {
+		if (huge_pte_none(hugetlb_pte_get(&src_hpte))) {
 			old_addr += hugetlb_pte_size(&src_hpte);
 			new_addr += hugetlb_pte_size(&src_hpte);
 			continue;
@@ -5493,7 +5494,7 @@ static void __unmap_hugepage_range(struct mmu_gather *tlb, struct vm_area_struct
 			continue;
 		}
 
-		pte = huge_ptep_get(hpte.ptep);
+		pte = hugetlb_pte_get(&hpte);
 
 		if (huge_pte_none(pte)) {
 			spin_unlock(ptl);
@@ -5720,6 +5721,7 @@ static vm_fault_t hugetlb_wp(struct mm_struct *mm, struct vm_area_struct *vma,
 	vm_fault_t ret = 0;
 	unsigned long haddr = address & huge_page_mask(h);
 	struct mmu_notifier_range range;
+	struct hugetlb_pte new_hpte;
 
 	/*
 	 * hugetlb does not support FOLL_FORCE-style write faults that keep the
@@ -5730,11 +5732,11 @@ static vm_fault_t hugetlb_wp(struct mm_struct *mm, struct vm_area_struct *vma,
 
 	/* Let's take out MAP_SHARED mappings first. */
 	if (vma->vm_flags & VM_MAYSHARE) {
-		set_huge_ptep_writable(vma, haddr, ptep);
+		set_huge_ptep_writable(vma, haddr, hpte);
 		return 0;
 	}
 
-	pte = huge_ptep_get(ptep);
+	pte = hugetlb_pte_get(hpte);
 	old_page = pte_page(pte);
 
 	delayacct_wpcopy_start();
@@ -5748,7 +5750,7 @@ retry_avoidcopy:
 		if (!PageAnonExclusive(old_page))
 			page_move_anon_rmap(old_page, vma);
 		if (likely(!unshare))
-			set_huge_ptep_writable(vma, haddr, ptep);
+			set_huge_ptep_writable(vma, haddr, hpte);
 
 		delayacct_wpcopy_end();
 		return 0;
@@ -5812,9 +5814,15 @@ retry_avoidcopy:
 			hugetlb_vma_lock_read(vma);
 			spin_lock(ptl);
 			ptep = hugetlb_walk(vma, haddr, huge_page_size(h));
-			if (likely(ptep &&
-				   pte_same(huge_ptep_get(ptep), pte)))
-				goto retry_avoidcopy;
+			if (likely(ptep)) {
+				hugetlb_pte_populate(mm, &new_hpte, ptep,
+						huge_page_shift(h),
+						hpage_size_to_level(
+							huge_page_size(h)));
+				if (likely(pte_same(hugetlb_pte_get(&hpte),
+								pte)))
+					goto retry_avoidcopy;
+			}
 			/*
 			 * race occurs while re-acquiring page table
 			 * lock, and our job is done.
@@ -5850,7 +5858,10 @@ retry_avoidcopy:
 	 */
 	spin_lock(ptl);
 	ptep = hugetlb_walk(vma, haddr, huge_page_size(h));
-	if (likely(ptep && pte_same(huge_ptep_get(ptep), pte))) {
+	if (likely(ptep))
+		hugetlb_pte_populate(mm, &new_hpte, ptep, huge_page_shift(h),
+				hpage_size_to_level(huge_page_size(h)));
+	if (likely(ptep && pte_same(hugetlb_pte_get(&new_hpte), pte))) {
 		/* Break COW or unshare */
 		huge_ptep_clear_flush(vma, haddr, ptep);
 		mmu_notifier_invalidate_range(mm, range.start, range.end);
@@ -5977,7 +5988,7 @@ static bool hugetlb_pte_stable(struct hstate *h, struct hugetlb_pte *hpte,
 	bool same;
 
 	ptl = hugetlb_pte_lock(hpte);
-	same = pte_same(huge_ptep_get(hpte->ptep), old_pte);
+	same = pte_same(hugetlb_pte_get(hpte), old_pte);
 	spin_unlock(ptl);
 
 	return same;
@@ -6152,7 +6163,7 @@ static vm_fault_t hugetlb_no_page(struct mm_struct *mm,
 	 * will need to be addressed when HGM is supported for architectures
 	 * that support contiguous PTEs.
 	 */
-	if (!pte_same(huge_ptep_get(hpte->ptep), old_pte))
+	if (!pte_same(hugetlb_pte_get(hpte), old_pte))
 		goto backout;
 
 	if (anon_rmap)
@@ -6271,7 +6282,7 @@ vm_fault_t hugetlb_fault(struct mm_struct *mm, struct vm_area_struct *vma,
 		return VM_FAULT_OOM;
 	}
 
-	entry = huge_ptep_get(hpte.ptep);
+	entry = hugetlb_pte_get(&hpte);
 	/* PTE markers should be handled the same way as none pte */
 	if (huge_pte_none_mostly(entry)) {
 		/*
@@ -6335,7 +6346,7 @@ vm_fault_t hugetlb_fault(struct mm_struct *mm, struct vm_area_struct *vma,
 	ptl = hugetlb_pte_lock(&hpte);
 
 	/* Check for a racing update before calling hugetlb_wp() */
-	if (unlikely(!pte_same(entry, huge_ptep_get(hpte.ptep))))
+	if (unlikely(!pte_same(entry, hugetlb_pte_get(&hpte))))
 		goto out_ptl;
 
 	/* haddr_hgm is the base address of the region that hpte maps. */
@@ -6563,7 +6574,7 @@ int hugetlb_mcopy_atomic_pte(struct mm_struct *dst_mm,
 	 * page backing it, then access the page.
 	 */
 	ret = -EEXIST;
-	if (!huge_pte_none_mostly(huge_ptep_get(dst_hpte->ptep)))
+	if (!huge_pte_none_mostly(hugetlb_pte_get(dst_hpte)))
 		goto out_release_unlock;
 
 	if (page_in_pagecache)
@@ -6677,7 +6688,7 @@ struct page *hugetlb_follow_page_mask(struct vm_area_struct *vma,
 
 retry:
 	ptl = hugetlb_pte_lock(&hpte);
-	entry = huge_ptep_get(hpte.ptep);
+	entry = hugetlb_pte_get(&hpte);
 	if (pte_present(entry)) {
 		if (unlikely(!hugetlb_pte_present_leaf(&hpte, entry))) {
 			/*
@@ -6757,7 +6768,7 @@ long follow_hugetlb_page(struct mm_struct *mm, struct vm_area_struct *vma,
 		} else {
 			ptl = hugetlb_pte_lock(&hpte);
 			ptep = hpte.ptep;
-			pte = huge_ptep_get(ptep);
+			pte = hugetlb_pte_get(&hpte);
 			absent = huge_pte_none(pte);
 		}
 
@@ -6977,7 +6988,7 @@ unsigned long hugetlb_change_protection(struct vm_area_struct *vma,
 			address = (address | last_addr_mask) + psize;
 			continue;
 		}
-		pte = huge_ptep_get(hpte.ptep);
+		pte = hugetlb_pte_get(&hpte);
 		if (unlikely(is_hugetlb_entry_hwpoisoned(pte))) {
 			spin_unlock(ptl);
 			goto next_hpte;
@@ -7527,7 +7538,7 @@ static int hugetlb_hgm_walk(struct mm_struct *mm, struct vm_area_struct *vma,
 	hugetlb_walk_lock_check(vma);
 
 	while (hugetlb_pte_size(hpte) > sz && !ret) {
-		pte = huge_ptep_get(hpte->ptep);
+		pte = hugetlb_pte_get(hpte);
 		if (!pte_present(pte)) {
 			if (!alloc)
 				return 0;
@@ -7967,7 +7978,7 @@ int hugetlb_collapse(struct mm_struct *mm, struct vm_area_struct *vma,
 		if (ret)
 			goto out;
 
-		entry = huge_ptep_get(hpte.ptep);
+		entry = hugetlb_pte_get(&hpte);
 
 		/*
 		 * There is no work to do if the PTE doesn't point to page
