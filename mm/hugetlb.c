@@ -5564,11 +5564,12 @@ static void unmap_ref_private(struct mm_struct *mm, struct vm_area_struct *vma,
  * Keep the pte_same checks anyway to make transition from the mutex easier.
  */
 static vm_fault_t hugetlb_wp(struct mm_struct *mm, struct vm_area_struct *vma,
-		       unsigned long address, pte_t *ptep, unsigned int flags,
-		       struct page *pagecache_page, spinlock_t *ptl)
+		       unsigned long address, struct hugetlb_pte *hpte,
+		       unsigned int flags, struct page *pagecache_page)
 {
 	const bool unshare = flags & FAULT_FLAG_UNSHARE;
-	pte_t pte;
+	pte_t pte, *ptep = hpte->ptep;
+	spinlock_t *ptl = hugetlb_pte_lockptr(hpte);
 	struct hstate *h = hstate_vma(vma);
 	struct page *old_page, *new_page;
 	int outside_reserve = 0;
@@ -6032,7 +6033,7 @@ static vm_fault_t hugetlb_no_page(struct mm_struct *mm,
 	if ((flags & FAULT_FLAG_WRITE) && !(vma->vm_flags & VM_SHARED)) {
 		BUG_ON(hugetlb_pte_size(hpte) != huge_page_size(h));
 		/* Optimization, do the COW without a second fault */
-		ret = hugetlb_wp(mm, vma, address, hpte->ptep, flags, page, ptl);
+		ret = hugetlb_wp(mm, vma, address, hpte, flags, page);
 	}
 
 	spin_unlock(ptl);
@@ -6234,8 +6235,8 @@ vm_fault_t hugetlb_fault(struct mm_struct *mm, struct vm_area_struct *vma,
 	if (flags & (FAULT_FLAG_WRITE|FAULT_FLAG_UNSHARE)) {
 		if (!huge_pte_write(entry)) {
 			BUG_ON(hugetlb_pte_size(&hpte) != huge_page_size(h));
-			ret = hugetlb_wp(mm, vma, address, hpte.ptep, flags,
-					 pagecache_page, ptl);
+			ret = hugetlb_wp(mm, vma, address, hpte, flags,
+					 pagecache_page);
 			goto out_put_page;
 		} else if (likely(flags & FAULT_FLAG_WRITE)) {
 			entry = huge_pte_mkdirty(entry);
