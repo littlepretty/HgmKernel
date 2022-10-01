@@ -328,7 +328,7 @@ void __migration_entry_wait_huge(struct hugetlb_pte *hpte, spinlock_t *ptl)
 	pte_t pte;
 
 	spin_lock(ptl);
-	pte = huge_ptep_get(hpte->ptep);
+	pte = hugetlb_pte_get(hpte);
 
 	if (unlikely(!is_hugetlb_entry_migration(pte)))
 		spin_unlock(ptl);

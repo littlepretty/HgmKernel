@@ -29,7 +29,7 @@ static int mincore_hugetlb(struct hugetlb_pte *hpte, unsigned long addr,
 	unsigned char present;
 	unsigned long end = addr + hugetlb_pte_size(hpte);
 	unsigned char *vec = walk->private;
-	pte_t pte = huge_ptep_get(hpte->ptep);
+	pte_t pte = hugetlb_pte_get(hpte);
 
 	/*
 	 * Hugepages under user process are always in RAM and never
