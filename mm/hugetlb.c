@@ -5819,7 +5819,7 @@ retry_avoidcopy:
 						huge_page_shift(h),
 						hpage_size_to_level(
 							huge_page_size(h)));
-				if (likely(pte_same(hugetlb_pte_get(&hpte),
+				if (likely(pte_same(hugetlb_pte_get(&new_hpte),
 								pte)))
 					goto retry_avoidcopy;
 			}
