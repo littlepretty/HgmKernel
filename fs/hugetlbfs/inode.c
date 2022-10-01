@@ -398,7 +398,7 @@ static bool hugetlb_vma_maybe_maps_page(struct vm_area_struct *vma,
 	hugetlb_pte_populate(&hpte, ptep, huge_page_shift(h),
 			hpage_size_to_level(huge_page_size(h)));
 
-	pte = huge_ptep_get(ptep);
+	pte = hugetlb_pte_get(&hpte);
 	if (huge_pte_none(pte) || !pte_present(pte))
 		return false;
 
