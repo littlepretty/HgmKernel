@@ -776,7 +776,7 @@ static int smaps_hugetlb_range(struct hugetlb_pte *hpte,
 	struct mem_size_stats *mss = walk->private;
 	struct vm_area_struct *vma = walk->vma;
 	struct page *page = NULL;
-	pte_t pte = huge_ptep_get(hpte->ptep);
+	pte_t pte = hugetlb_pte_get(hpte);
 
 	if (pte_present(pte)) {
 		/* We only care about leaf-level PTEs. */
@@ -1641,7 +1641,7 @@ static int pagemap_hugetlb_range(struct hugetlb_pte *hpte,
 	int err = 0;
 	unsigned long hmask = hugetlb_pte_mask(hpte);
 	unsigned long end = addr + hugetlb_pte_size(hpte);
-	pte_t pte = huge_ptep_get(hpte->ptep);
+	pte_t pte = hugetlb_pte_get(hpte);
 	struct page *page;
 
 	if (vma->vm_flags & VM_SOFTDIRTY)
@@ -1986,7 +1986,7 @@ static int gather_hugetlb_stats(struct hugetlb_pte *hpte, unsigned long addr,
 		struct mm_walk *walk)
 {
 	struct show_numa_map_private *priv = walk->private;
-	pte_t huge_pte = huge_ptep_get(hpte->ptep);
+	pte_t huge_pte = hugetlb_pte_get(hpte);
 	struct numa_maps *md;
 	struct page *page;
 

@@ -413,7 +413,7 @@ retry:
 		}
 
 		if (mode != MCOPY_ATOMIC_CONTINUE &&
-		    !huge_pte_none_mostly(huge_ptep_get(hpte.ptep))) {
+		    !huge_pte_none_mostly(hugetlb_pte_get(&hpte))) {
 			err = -EEXIST;
 			hugetlb_vma_unlock_read(dst_vma);
 			mutex_unlock(&hugetlb_fault_mutex_table[hash]);

@@ -392,7 +392,7 @@ static bool hugetlb_vma_maps_page(struct vm_area_struct *vma,
 	if (hugetlb_full_walk(&hpte, vma, addr))
 		return false;
 
-	pte = huge_ptep_get(hpte.ptep);
+	pte = hugetlb_pte_get(&hpte);
 	if (huge_pte_none(pte) || !pte_present(pte))
 		return false;
 
