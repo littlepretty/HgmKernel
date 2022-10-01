@@ -371,7 +371,6 @@ static inline void __migration_entry_wait(struct mm_struct *mm, pte_t *ptep,
 static inline void migration_entry_wait(struct mm_struct *mm, pmd_t *pmd,
 					 unsigned long address) { }
 #ifdef CONFIG_HUGETLB_PAGE
-<<<<<<< HEAD
 static inline void __migration_entry_wait_huge(struct vm_area_struct *vma,
 					       struct hugetlb *hpte,
 					       spinlock_t *ptl) { }

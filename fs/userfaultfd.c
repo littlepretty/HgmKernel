@@ -252,7 +252,7 @@ static inline bool userfaultfd_huge_must_wait(struct userfaultfd_ctx *ctx,
 		goto out;
 
 	ret = false;
-	pte = huge_ptep_get(hpte.ptep);
+	pte = hugetlb_pte_get(&hpte);
 
 	/*
 	 * Lockless access: we're in a wait_event so it's ok if it

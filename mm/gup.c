@@ -2499,18 +2499,21 @@ static int gup_hugepte(pte_t *ptep, unsigned long sz, unsigned long addr,
 	struct folio *folio;
 	pte_t pte;
 	int refs;
+	struct hugetlb_pte hpte;
+	hugetlb_pte_populate(&hpte, ptep, sz, hpage_size_to_level(sz));
 
 	pte_end = (addr + sz) & ~(sz-1);
 	if (pte_end < end)
 		end = pte_end;
 
-	pte = huge_ptep_get(ptep);
+	pte = hugetlb_pte_get(&hpte);
 
 	if (!pte_access_permitted(pte, flags & FOLL_WRITE))
 		return 0;
 
 	/* hugepages are never "special" */
 	VM_BUG_ON(!pfn_valid(pte_pfn(pte)));
+	VM_BUG_ON(!hugetlb_pte_present_leaf(&hpte, pte));
 
 	page = nth_page(pte_page(pte), (addr & (sz - 1)) >> PAGE_SHIFT);
 	refs = record_subpages(page, addr, end, pages + *nr);

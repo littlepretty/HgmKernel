@@ -337,7 +337,7 @@ void migration_entry_wait_huge(struct vm_area_struct *vma,
 
 	hugetlb_vma_assert_locked(vma);
 	ptl = hugetlb_pte_lock(hpte);
-	pte = huge_ptep_get(hpte->ptep);
+	pte = hugetlb_pte_get(hpte);
 
 	if (unlikely(!is_hugetlb_entry_migration(pte))) {
 		spin_unlock(ptl);

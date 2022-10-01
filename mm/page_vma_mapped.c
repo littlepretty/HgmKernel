@@ -194,7 +194,7 @@ retry:
 			pvmw->pte = hpte.ptep;
 			pvmw->pte_order = hpte.shift - PAGE_SHIFT;
 			pvmw->ptl = hugetlb_pte_lock(&hpte);
-			pteval = huge_ptep_get(hpte.ptep);
+			pteval = hugetlb_pte_get(&hpte);
 			if (pte_present(pteval) && !hugetlb_pte_present_leaf(
 						&hpte, pteval)) {
 				/*
