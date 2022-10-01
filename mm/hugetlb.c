@@ -6655,11 +6655,10 @@ struct page *hugetlb_follow_page_mask(struct vm_area_struct *vma,
 				unsigned long address, unsigned int flags)
 {
 	struct hstate *h = hstate_vma(vma);
-	struct mm_struct *mm = vma->vm_mm;
-	unsigned long haddr = address & huge_page_mask(h);
 	struct page *page = NULL;
 	spinlock_t *ptl;
-	pte_t *pte, entry;
+	pte_t entry;
+	struct hugetlb_pte hpte;
 
 	/*
 	 * FOLL_PIN is not supported for follow_page(). Ordinary GUP goes via
@@ -6669,13 +6668,24 @@ struct page *hugetlb_follow_page_mask(struct vm_area_struct *vma,
 		return NULL;
 
 	hugetlb_vma_lock_read(vma);
-	pte = hugetlb_walk(vma, haddr, huge_page_size(h));
-	if (!pte)
+
+	if (hugetlb_full_walk(&hpte, vma, address))
 		goto out_unlock;
 
-	ptl = huge_pte_lock(h, mm, pte);
-	entry = huge_ptep_get(pte);
+retry:
+	ptl = hugetlb_pte_lock(&hpte);
+	entry = huge_ptep_get(hpte.ptep);
 	if (pte_present(entry)) {
+		if (unlikely(!hugetlb_pte_present_leaf(&hpte, entry))) {
+			/*
+			 * We raced with someone splitting from under us.
+			 * Keep walking to get to the real leaf.
+			 */
+			spin_unlock(ptl);
+			hugetlb_full_walk_continue(&hpte, vma, address);
+			goto retry;
+		}
+
 		page = pte_page(entry) +
 				((address & ~huge_page_mask(h)) >> PAGE_SHIFT);
 		/*
