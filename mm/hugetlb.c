@@ -7383,6 +7383,13 @@ int huge_pmd_unshare(struct mm_struct *mm, struct vm_area_struct *vma,
 	p4d_t *p4d = p4d_offset(pgd, addr);
 	pud_t *pud = pud_offset(p4d, addr);
 
+	if (hugetlb_hgm_enabled(vma))
+		/*
+		 * If HGM is enabled, ptep could point at page table
+		 * pages, so don't do anything.
+		 */
+		return 0;
+
 	i_mmap_assert_write_locked(vma->vm_file->f_mapping);
 	hugetlb_vma_assert_locked(vma);
 	BUG_ON(page_count(virt_to_page(ptep)) == 0);
