@@ -5127,15 +5127,22 @@ static bool is_hugetlb_entry_hwpoisoned(pte_t pte)
 }
 
 static void
-hugetlb_install_page(struct vm_area_struct *vma, pte_t *ptep, unsigned long addr,
-		     struct page *new_page)
+hugetlb_install_page(struct vm_area_struct *vma, struct hugetlb_pte *hpte,
+		     unsigned long addr, struct page *new_page)
 {
 	struct hstate *h = hstate_vma(vma);
+	unsigned long sz = hugetlb_pte_size(hpte);
+
+	/*
+	 * hugetlb_install_page should always be called with a
+	 * non-high-granularity mapping.
+	 */
+	BUG_ON(sz != huge_page_size(h));
 	__SetPageUptodate(new_page);
 	hugepage_add_new_anon_rmap(new_page, vma, addr);
-	set_huge_pte_at(vma->vm_mm, addr, ptep, make_huge_pte(vma, new_page, 1,
-				huge_page_shift(h)));
-	hugetlb_count_add(pages_per_huge_page(h), vma->vm_mm);
+	set_huge_pte_at(vma->vm_mm, addr, hpte->ptep,
+			make_huge_pte(vma, new_page, 1, sz));
+	hugetlb_count_add(sz / PAGE_SIZE, vma->vm_mm);
 	SetHPageMigratable(new_page);
 }
 
@@ -5317,7 +5324,7 @@ again:
 					/* huge_ptep of dst_pte won't change as in child */
 					goto again;
 				}
-				hugetlb_install_page(dst_vma, dst_pte, addr, new);
+				hugetlb_install_page(dst_vma, &dst_hpte, addr, new);
 				spin_unlock(src_ptl);
 				spin_unlock(dst_ptl);
 				addr += hugetlb_pte_size(&src_hpte);
