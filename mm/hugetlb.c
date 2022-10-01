@@ -5230,7 +5230,7 @@ static void move_hugetlb_pte(struct vm_area_struct *vma, unsigned long old_addr,
 	if (src_ptl != dst_ptl)
 		spin_lock_nested(src_ptl, SINGLE_DEPTH_NESTING);
 
-	pte = huge_ptep_get_and_clear(mm, old_addr, src_hpte->ptep);
+	pte = hugetlb_pte_get_and_clear(mm, old_addr, src_hpte);
 	set_huge_pte_at(mm, new_addr, dst_hpte->ptep, pte);
 
 	if (src_ptl != dst_ptl)
@@ -5408,7 +5408,7 @@ static void __unmap_hugepage_range(struct mmu_gather *tlb, struct vm_area_struct
 			set_vma_resv_flags(vma, HPAGE_RESV_UNMAPPED);
 		}
 
-		pte = huge_ptep_get_and_clear(mm, address, hpte.ptep);
+		pte = hugetlb_pte_get_and_clear(mm, address, &hpte);
 		tlb_change_page_size(tlb, hugetlb_pte_size(&hpte));
 		tlb_remove_huge_tlb_entry(tlb, hpte, address);
 		if (huge_pte_dirty(pte))
