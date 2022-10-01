@@ -4999,7 +4999,7 @@ hugetlb_install_page(struct vm_area_struct *vma, struct hugetlb_pte *hpte,
 	BUG_ON(sz != huge_page_size(h));
 	__SetPageUptodate(new_page);
 	hugepage_add_new_anon_rmap(new_page, vma, addr);
-	set_huge_pte_at(vma->vm_mm, addr, hpte->ptep,
+	set_hugetlb_pte_at(vma->vm_mm, addr, hpte,
 			make_huge_pte(vma, new_page, 1, sz));
 	hugetlb_count_add(sz / PAGE_SIZE, vma->vm_mm);
 	SetHPageMigratable(new_page);
@@ -5095,7 +5095,7 @@ again:
 
 			if (!userfaultfd_wp(dst_vma) && uffd_wp)
 				entry = huge_pte_clear_uffd_wp(entry);
-			set_huge_pte_at(dst, addr, dst_pte, entry);
+			set_hugetlb_pte_at(dst, addr, &dst_hpte, entry);
 		} else if (unlikely(is_hugetlb_entry_migration(entry))) {
 			swp_entry_t swp_entry = pte_to_swp_entry(entry);
 			bool uffd_wp = huge_pte_uffd_wp(entry);
@@ -5110,18 +5110,18 @@ again:
 				entry = swp_entry_to_pte(swp_entry);
 				if (userfaultfd_wp(src_vma) && uffd_wp)
 					entry = huge_pte_mkuffd_wp(entry);
-				set_huge_pte_at(src, addr, src_pte, entry);
+				set_hugetlb_pte_at(src, addr, &src_hpte, entry);
 			}
 			if (!userfaultfd_wp(dst_vma) && uffd_wp)
 				entry = huge_pte_clear_uffd_wp(entry);
-			set_huge_pte_at(dst, addr, dst_pte, entry);
+			set_hugetlb_pte_at(dst, addr, &dst_hpte, entry);
 		} else if (unlikely(is_pte_marker(entry))) {
 			/*
 			 * We copy the pte marker only if the dst vma has
 			 * uffd-wp enabled.
 			 */
 			if (userfaultfd_wp(dst_vma))
-				set_huge_pte_at(dst, addr, dst_pte, entry);
+				set_hugetlb_pte_at(dst, addr, &dst_hpte, entry);
 		} else if (!hugetlb_pte_present_leaf(&src_hpte, entry)) {
 			/* Retry the walk. */
 			spin_unlock(src_ptl);
@@ -5199,7 +5199,7 @@ again:
 				entry = huge_pte_wrprotect(entry);
 			}
 
-			set_huge_pte_at(dst, addr, dst_pte, entry);
+			set_hugetlb_pte_at(dst, addr, &dst_hpte, entry);
 			hugetlb_count_add(
 					hugetlb_pte_size(&dst_hpte) / PAGE_SIZE,
 					dst);
@@ -5238,7 +5238,7 @@ static void move_hugetlb_pte(struct vm_area_struct *vma, unsigned long old_addr,
 		spin_lock_nested(src_ptl, SINGLE_DEPTH_NESTING);
 
 	pte = hugetlb_pte_get_and_clear(mm, old_addr, src_hpte);
-	set_huge_pte_at(mm, new_addr, dst_hpte->ptep, pte);
+	set_hugetlb_pte_at(mm, new_addr, dst_hpte, pte);
 
 	if (src_ptl != dst_ptl)
 		spin_unlock(src_ptl);
@@ -5377,7 +5377,7 @@ static void __unmap_hugepage_range(struct mmu_gather *tlb, struct vm_area_struct
 			 */
 			if (pte_swp_uffd_wp_any(pte) &&
 			    !(zap_flags & ZAP_FLAG_DROP_MARKER))
-				set_huge_pte_at(mm, address, hpte.ptep,
+				set_hugetlb_pte_at(mm, address, &hpte,
 						make_pte_marker(PTE_MARKER_UFFD_WP));
 			else
 				hugetlb_pte_clear(mm, address, &hpte);
@@ -5422,7 +5422,7 @@ static void __unmap_hugepage_range(struct mmu_gather *tlb, struct vm_area_struct
 		/* Leave a uffd-wp pte marker if needed */
 		if (huge_pte_uffd_wp(pte) &&
 		    !(zap_flags & ZAP_FLAG_DROP_MARKER))
-			set_huge_pte_at(mm, address, hpte.ptep,
+			set_hugetlb_pte_at(mm, address, &hpte,
 					make_pte_marker(PTE_MARKER_UFFD_WP));
 		hugetlb_count_sub(hugetlb_pte_size(&hpte)/PAGE_SIZE, mm);
 		page_remove_rmap(hpage, vma, true);
@@ -5729,7 +5729,7 @@ retry_avoidcopy:
 		mmu_notifier_invalidate_range(mm, range.start, range.end);
 		page_remove_rmap(old_page, vma, true);
 		hugepage_add_new_anon_rmap(new_page, vma, haddr);
-		set_huge_pte_at(mm, haddr, ptep,
+		set_hugetlb_pte_at(mm, haddr, &new_hpte,
 				make_huge_pte(vma, new_page, !unshare,
 					huge_page_shift(h)));
 		SetHPageMigratable(new_page);
@@ -6044,7 +6044,7 @@ static vm_fault_t hugetlb_no_page(struct mm_struct *mm,
 	 */
 	if (unlikely(pte_marker_uffd_wp(old_pte)))
 		new_pte = huge_pte_wrprotect(huge_pte_mkuffd_wp(new_pte));
-	set_huge_pte_at(mm, haddr_hgm, hpte->ptep, new_pte);
+	set_hugetlb_pte_at(mm, haddr_hgm, hpte, new_pte);
 
 	hugetlb_count_add(hugetlb_pte_size(hpte) / PAGE_SIZE, mm);
 	if ((flags & FAULT_FLAG_WRITE) && !(vma->vm_flags & VM_SHARED)) {
@@ -6468,7 +6468,7 @@ int hugetlb_mcopy_atomic_pte(struct mm_struct *dst_mm,
 	if (wp_copy)
 		_dst_pte = huge_pte_mkuffd_wp(_dst_pte);
 
-	set_huge_pte_at(dst_mm, dst_addr, dst_hpte->ptep, _dst_pte);
+	set_hugetlb_pte_at(dst_mm, dst_addr, dst_hpte, _dst_pte);
 
 	hugetlb_count_add(hugetlb_pte_size(dst_hpte) / PAGE_SIZE, dst_mm);
 
@@ -6869,7 +6869,7 @@ unsigned long hugetlb_change_protection(struct vm_area_struct *vma,
 					newpte = pte_swp_mkuffd_wp(newpte);
 				else if (uffd_wp_resolve)
 					newpte = pte_swp_clear_uffd_wp(newpte);
-				set_huge_pte_at(mm, address, hpte.ptep, newpte);
+				set_hugetlb_pte_at(mm, address, &hpte, newpte);
 				base_pages += hugetlb_pte_size(&hpte) / PAGE_SIZE;
 			}
 			spin_unlock(ptl);
@@ -6913,7 +6913,7 @@ unsigned long hugetlb_change_protection(struct vm_area_struct *vma,
 			/* None pte */
 			if (unlikely(uffd_wp))
 				/* Safe to modify directly (none->non-present). */
-				set_huge_pte_at(mm, address, ptep,
+				set_hugetlb_pte_at(mm, address, &hpte,
 						make_pte_marker(PTE_MARKER_UFFD_WP));
 		}
 		spin_unlock(ptl);
@@ -8074,7 +8074,7 @@ int hugetlb_collapse(struct mm_struct *mm, struct vm_area_struct *vma,
 
 		subpage = hugetlb_find_subpage(h, hpage, curr);
 		entry = make_huge_pte(vma, subpage, writable, hpte.shift);
-		set_huge_pte_at(mm, curr, hpte.ptep, entry);
+		set_hugetlb_pte_at(mm, curr, &hpte, entry);
 next_hpte:
 		curr += hugetlb_pte_size(&hpte);
 

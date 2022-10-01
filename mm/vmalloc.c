@@ -108,6 +108,7 @@ static int vmap_pte_range(pmd_t *pmd, unsigned long addr, unsigned long end,
 	pte_t *pte;
 	u64 pfn;
 	unsigned long size = PAGE_SIZE;
+	struct hugetlb_pte hpte;
 
 	pfn = phys_addr >> PAGE_SHIFT;
 	pte = pte_alloc_kernel_track(pmd, addr, mask);
@@ -119,10 +120,14 @@ static int vmap_pte_range(pmd_t *pmd, unsigned long addr, unsigned long end,
 #ifdef CONFIG_HUGETLB_PAGE
 		size = arch_vmap_pte_range_map_size(addr, end, pfn, max_page_shift);
 		if (size != PAGE_SIZE) {
+			unsigned int shift = ilog2(size);
 			pte_t entry = pfn_pte(pfn, prot);
 
-			entry = arch_make_huge_pte(entry, ilog2(size), 0);
-			set_huge_pte_at(&init_mm, addr, pte, entry);
+			hugetlb_pte_populate(&init_mm, &hpte, pte, shift,
+					hpage_size_to_level(size));
+
+			entry = arch_make_huge_pte(entry, shift, 0);
+			set_hugetlb_pte_at(&init_mm, addr, &hpte, entry);
 			pfn += PFN_DOWN(size);
 			continue;
 		}
