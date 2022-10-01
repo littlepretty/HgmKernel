@@ -5862,7 +5862,7 @@ retry_avoidcopy:
 				hpage_size_to_level(huge_page_size(h)));
 	if (likely(ptep && pte_same(hugetlb_pte_get(&new_hpte), pte))) {
 		/* Break COW or unshare */
-		huge_ptep_clear_flush(vma, haddr, ptep);
+		hugetlb_pte_clear_flush(vma, haddr, &new_hpte);
 		mmu_notifier_invalidate_range(mm, range.start, range.end);
 		page_remove_rmap(old_page, vma, true);
 		hugepage_add_new_anon_rmap(new_page, vma, haddr);
