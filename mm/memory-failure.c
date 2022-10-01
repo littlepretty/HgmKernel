@@ -724,7 +724,7 @@ static int hwpoison_hugetlb_range(struct hugetlb_pte *hpte,
 				  struct mm_walk *walk)
 {
 	struct hwp_walk *hwp = walk->private;
-	pte_t pte = huge_ptep_get(hpte->ptep);
+	pte_t pte = hugetlb_pte_get(hpte);
 
 	return check_hwpoisoned_entry(pte, addr & hugetlb_pte_mask(hpte),
 			hpte->shift, hwp->pfn, &hwp->tk);
