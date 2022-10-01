@@ -6225,7 +6225,7 @@ int hugetlb_mcopy_atomic_pte(struct mm_struct *dst_mm,
 
 	if (is_continue) {
 		ret = -EFAULT;
-		page = find_lock_page(mapping, idx);
+		page = find_get_page(mapping, idx);
 		if (!page)
 			goto out;
 		page_in_pagecache = true;
@@ -6300,7 +6300,8 @@ int hugetlb_mcopy_atomic_pte(struct mm_struct *dst_mm,
 	 * preceding stores to the page contents become visible before
 	 * the set_pte_at() write.
 	 */
-	__SetPageUptodate(page);
+	if (!is_continue)
+		__SetPageUptodate(page);
 
 	/* Add shared, newly allocated pages to the page cache. */
 	if (vm_shared && !is_continue) {
@@ -6374,14 +6375,14 @@ int hugetlb_mcopy_atomic_pte(struct mm_struct *dst_mm,
 	spin_unlock(ptl);
 	if (!is_continue)
 		SetHPageMigratable(page);
-	if (vm_shared || is_continue)
+	if (vm_shared && !is_continue)
 		unlock_page(page);
 	ret = 0;
 out:
 	return ret;
 out_release_unlock:
 	spin_unlock(ptl);
-	if (vm_shared || is_continue)
+	if (vm_shared && !is_continue)
 		unlock_page(page);
 out_release_nounlock:
 	if (!page_in_pagecache)
