@@ -330,13 +330,13 @@ void migration_entry_wait(struct mm_struct *mm, pmd_t *pmd,
  * This function will release the vma lock before returning.
  */
 void __migration_entry_wait_huge(struct vm_area_struct *vma,
-				 pte_t *ptep, spinlock_t *ptl)
+				 struct hugetlb_pte *hpte, spinlock_t *ptl)
 {
 	pte_t pte;
 
 	hugetlb_vma_assert_locked(vma);
 	spin_lock(ptl);
-	pte = huge_ptep_get(ptep);
+	pte = huge_ptep_get(hpte->ptep);
 
 	if (unlikely(!is_hugetlb_entry_migration(pte))) {
 		spin_unlock(ptl);
@@ -358,7 +358,7 @@ void migration_entry_wait_huge(struct vm_area_struct *vma,
 {
 	spinlock_t *ptl = hugetlb_pte_lockptr(vma->vm_mm, hpte);
 
-	__migration_entry_wait_huge(vma, hpte->ptep, ptl);
+	__migration_entry_wait_huge(vma, hpte, ptl);
 }
 #endif
 
