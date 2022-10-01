@@ -324,12 +324,12 @@ void migration_entry_wait(struct mm_struct *mm, pmd_t *pmd,
 }
 
 #ifdef CONFIG_HUGETLB_PAGE
-void __migration_entry_wait_huge(pte_t *ptep, spinlock_t *ptl)
+void __migration_entry_wait_huge(struct hugetlb_pte *hpte, spinlock_t *ptl)
 {
 	pte_t pte;
 
 	spin_lock(ptl);
-	pte = huge_ptep_get(ptep);
+	pte = huge_ptep_get(hpte->ptep);
 
 	if (unlikely(!is_hugetlb_entry_migration(pte)))
 		spin_unlock(ptl);
@@ -342,7 +342,7 @@ void migration_entry_wait_huge(struct vm_area_struct *vma,
 {
 	spinlock_t *ptl = hugetlb_pte_lockptr(vma->vm_mm, hpte);
 
-	__migration_entry_wait_huge(hpte->ptep, ptl);
+	__migration_entry_wait_huge(hpte, ptl);
 }
 #endif
 
