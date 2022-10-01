@@ -347,7 +347,7 @@ extern void __migration_entry_wait(struct mm_struct *mm, pte_t *ptep,
 extern void migration_entry_wait(struct mm_struct *mm, pmd_t *pmd,
 					unsigned long address);
 #ifdef CONFIG_HUGETLB_PAGE
-extern void __migration_entry_wait_huge(pte_t *ptep, spinlock_t *ptl);
+extern void __migration_entry_wait_huge(struct hugetlb_pte *hpte, spinlock_t *ptl);
 extern void migration_entry_wait_huge(struct vm_area_struct *vma,
 					struct hugetlb_pte *hpte);
 #endif	/* CONFIG_HUGETLB_PAGE */
@@ -377,7 +377,7 @@ static inline void __migration_entry_wait(struct mm_struct *mm, pte_t *ptep,
 static inline void migration_entry_wait(struct mm_struct *mm, pmd_t *pmd,
 					 unsigned long address) { }
 #ifdef CONFIG_HUGETLB_PAGE
-static inline void __migration_entry_wait_huge(pte_t *ptep, spinlock_t *ptl) { }
+static inline void __migration_entry_wait_huge(struct hugetlb *hpte, spinlock_t *ptl) { }
 static inline void migration_entry_wait_huge(struct vm_area_struct *vma,
 						struct hugetlb_pte *hpte) { }
 #endif	/* CONFIG_HUGETLB_PAGE */
