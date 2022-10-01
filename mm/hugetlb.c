@@ -6624,7 +6624,7 @@ retry_walk:
 			spin_unlock(ptl);
 			if (hugetlb_hgm_enabled(vma))
 				hugetlb_vma_unlock_read(vma);
-			__migration_entry_wait_huge(pte, ptl);
+			__migration_entry_wait_huge(&hpte, ptl);
 			goto retry;
 		}
 		/*
