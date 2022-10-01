@@ -343,7 +343,7 @@ static void damon_hugetlb_mkold(struct hugetlb_pte *hpte, pte_t entry,
 	if (pte_young(entry)) {
 		referenced = true;
 		entry = pte_mkold(entry);
-		set_huge_pte_at(mm, addr, hpte->ptep, entry);
+		set_hugetlb_pte_at(mm, addr, hpte, entry);
 	}
 
 #ifdef CONFIG_MMU_NOTIFIER
