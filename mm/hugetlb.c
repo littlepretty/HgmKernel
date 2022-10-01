@@ -5332,7 +5332,7 @@ again:
 				 *
 				 * See Documentation/mm/mmu_notifier.rst
 				 */
-				huge_ptep_set_wrprotect(src, addr, src_pte);
+				hugetlb_pte_set_wrprotect(src, addr, &src_hpte);
 				entry = huge_pte_wrprotect(entry);
 			}
 
@@ -6389,7 +6389,7 @@ vm_fault_t hugetlb_fault(struct mm_struct *mm, struct vm_area_struct *vma,
 	if (flags & (FAULT_FLAG_WRITE|FAULT_FLAG_UNSHARE)) {
 		if (!huge_pte_write(entry)) {
 			BUG_ON(hugetlb_pte_size(&hpte) != huge_page_size(h));
-			ret = hugetlb_wp(mm, vma, address, hpte, flags,
+			ret = hugetlb_wp(mm, vma, address, &hpte, flags,
 					 pagecache_page);
 			goto out_put_page;
 		} else if (likely(flags & FAULT_FLAG_WRITE)) {
