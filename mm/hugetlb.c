@@ -6396,6 +6396,7 @@ struct page *hugetlb_follow_page_mask(struct vm_area_struct *vma,
 	struct page *page = NULL;
 	spinlock_t *ptl;
 	pte_t *pte, entry;
+	struct hugetlb_pte hpte;
 
 	/*
 	 * FOLL_PIN is not supported for follow_page(). Ordinary GUP goes via
@@ -6409,9 +6410,23 @@ struct page *hugetlb_follow_page_mask(struct vm_area_struct *vma,
 	if (!pte)
 		goto out_unlock;
 
-	ptl = huge_pte_lock(h, mm, pte);
+retry_walk:
+	hugetlb_pte_populate(&hpte, pte, huge_page_shift(h),
+			hpage_size_to_level(huge_page_size(h)));
+
+	hugetlb_hgm_walk(mm, vma, &hpte, address,
+			PAGE_SIZE,
+			/*stop_at_none=*/true);
+
+	ptl = hugetlb_pte_lock(mm, &hpte);
 	entry = huge_ptep_get(pte);
 	if (pte_present(entry)) {
+		if (unlikely(!hugetlb_pte_present_leaf(&hpte, entry))) {
+			/* We raced with someone splitting from under us. */
+			spin_unlock(ptl);
+			goto retry_walk;
+		}
+
 		page = pte_page(entry) +
 				((address & ~huge_page_mask(h)) >> PAGE_SHIFT);
 		/*
