@@ -25,27 +25,31 @@ static inline void arch_clear_hugepage_flags(struct page *page)
 
 pte_t arch_make_huge_pte(pte_t entry, unsigned int shift, vm_flags_t flags);
 #define arch_make_huge_pte arch_make_huge_pte
-#define __HAVE_ARCH_HUGE_SET_HUGE_PTE_AT
-extern void set_huge_pte_at(struct mm_struct *mm, unsigned long addr,
-			    pte_t *ptep, pte_t pte);
-#define __HAVE_ARCH_HUGE_PTEP_SET_ACCESS_FLAGS
-extern int huge_ptep_set_access_flags(struct vm_area_struct *vma,
-				      unsigned long addr, pte_t *ptep,
+#define __HAVE_ARCH_HUGE_SET_HUGETLB_PTE_AT
+extern void set_hugetlb_pte_at(struct mm_struct *mm, unsigned long addr,
+				const struct hugetlb_pte *hpte, pte_t pte);
+#define __HAVE_ARCH_HUGETLB_PTE_SET_ACCESS_FLAGS
+extern int hugetlb_pte_set_access_flags(struct vm_area_struct *vma,
+				      unsigned long addr,
+				      const struct hugetlb_pte *hpte,
 				      pte_t pte, int dirty);
-#define __HAVE_ARCH_HUGE_PTEP_GET_AND_CLEAR
-extern pte_t huge_ptep_get_and_clear(struct mm_struct *mm,
-				     unsigned long addr, pte_t *ptep);
-#define __HAVE_ARCH_HUGE_PTEP_SET_WRPROTECT
-extern void huge_ptep_set_wrprotect(struct mm_struct *mm,
-				    unsigned long addr, pte_t *ptep);
-#define __HAVE_ARCH_HUGE_PTEP_CLEAR_FLUSH
-extern pte_t huge_ptep_clear_flush(struct vm_area_struct *vma,
-				   unsigned long addr, pte_t *ptep);
-#define __HAVE_ARCH_HUGE_PTE_CLEAR
-extern void huge_pte_clear(struct mm_struct *mm, unsigned long addr,
-			   pte_t *ptep, unsigned long sz);
-#define __HAVE_ARCH_HUGE_PTEP_GET
-extern pte_t huge_ptep_get(pte_t *ptep);
+#define __HAVE_ARCH_HUGETLB_PTE_GET_AND_CLEAR
+extern pte_t hugetlb_pte_get_and_clear(struct mm_struct *mm,
+				       unsigned long addr,
+				       const struct hugetlb_pte *hpte);
+#define __HAVE_ARCH_HUGETLB_PTE_SET_WRPROTECT
+extern void hugetlb_pte_set_wrprotect(struct mm_struct *mm,
+				      unsigned long addr,
+				      const struct hugetlb_pte *hpte);
+#define __HAVE_ARCH_HUGETLB_PTE_CLEAR_FLUSH
+extern pte_t hugetlb_pte_clear_flush(struct vm_area_struct *vma,
+				     unsigned long addr,
+				     const struct hugetlb_pte *hpte);
+#define __HAVE_ARCH_HUGETLB_PTE_CLEAR
+extern void hugetlb_pte_clear(struct mm_struct *mm, unsigned long addr,
+			      const struct hugetlb_pte *hpte);
+#define __HAVE_ARCH_HUGETLB_PTE_GET
+extern pte_t hugetlb_pte_get(const struct hugetlb_pte *hpte);
 
 void __init arm64_hugetlb_cma_reserve(void);
 
