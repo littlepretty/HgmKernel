@@ -126,7 +126,7 @@ int __hash_page_huge(unsigned long ea, unsigned long access, unsigned long vsid,
 #endif
 
 pte_t huge_ptep_modify_prot_start(struct vm_area_struct *vma,
-				  unsigned long addr, pte_t *ptep)
+				  unsigned long addr, struct hugetlb_pte *hpte)
 {
 	unsigned long pte_val;
 	/*
@@ -134,20 +134,22 @@ pte_t huge_ptep_modify_prot_start(struct vm_area_struct *vma,
 	 * possible. Also keep the pte_present true so that we don't take
 	 * wrong fault.
 	 */
-	pte_val = pte_update(vma->vm_mm, addr, ptep,
+	pte_val = pte_update(vma->vm_mm, addr, hpte->ptep,
 			     _PAGE_PRESENT, _PAGE_INVALID, 1);
 
 	return __pte(pte_val);
 }
 
 void huge_ptep_modify_prot_commit(struct vm_area_struct *vma, unsigned long addr,
-				  pte_t *ptep, pte_t old_pte, pte_t pte)
+				  struct hugetlb_pte *hpte, pte_t old_pte,
+				  pte_t pte)
 {
 
 	if (radix_enabled())
-		return radix__huge_ptep_modify_prot_commit(vma, addr, ptep,
+		return radix__huge_ptep_modify_prot_commit(vma, addr,
+							   hpte->ptep,
 							   old_pte, pte);
-	set_huge_pte_at(vma->vm_mm, addr, ptep, pte);
+	set_huge_pte_at(vma->vm_mm, addr, hpte->ptep, pte);
 }
 
 void __init hugetlbpage_init_defaultsize(void)
