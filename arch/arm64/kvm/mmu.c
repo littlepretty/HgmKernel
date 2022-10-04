@@ -1044,12 +1044,44 @@ transparent_hugepage_adjust(struct kvm *kvm, struct kvm_memory_slot *memslot,
 	return PAGE_SIZE;
 }
 
+static unsigned long hugetlb_stage2_mapping_size(
+			struct kvm_memory_slot *memslot,
+			struct vm_area_struct *vma,
+			unsigned long hva)
+{
+	unsigned long size = hugetlb_mapping_size(vma, hva);
+	switch (size) {
+#ifndef __PAGETABLE_PMD_FOLDED
+		case PUD_SIZE:
+			if (fault_supports_stage2_huge_mapping(memslot, hva,
+						PUD_SIZE))
+				return PUD_SIZE;
+			fallthrough;
+#endif
+		case CONT_PMD_SIZE:
+		case PMD_SIZE:
+			if (fault_supports_stage2_huge_mapping(memslot, hva,
+						PMD_SIZE))
+				return PMD_SIZE;
+			fallthrough;
+		case CONT_PTE_SIZE:
+		case PAGE_SIZE:
+			return PAGE_SIZE;
+		case 0:
+			/* @hva wasn't mapped. */
+		default:
+			BUG();
+	}
+}
+
 static int get_vma_page_shift(struct vm_area_struct *vma, unsigned long hva)
 {
 	unsigned long pa;
 
 	if (is_vm_hugetlb_page(vma) && !(vma->vm_flags & VM_PFNMAP))
-		return huge_page_shift(hstate_vma(vma));
+		return !hugetlb_hgm_enabled(vma)
+			? huge_page_shift(hstate_vma(vma))
+			: PAGE_SHIFT;
 
 	if (!(vma->vm_flags & VM_PFNMAP))
 		return PAGE_SHIFT;
@@ -1284,6 +1316,9 @@ static int user_mem_abort(struct kvm_vcpu *vcpu, phys_addr_t fault_ipa,
 	if (vma_pagesize == PAGE_SIZE && !(force_pte || device)) {
 		if (fault_status == FSC_PERM && fault_granule > PAGE_SIZE)
 			vma_pagesize = fault_granule;
+		else if (is_vm_hugetlb_page(vma))
+			vma_pagesize = hugetlb_stage2_mapping_size(memslot,
+					vma, hva);
 		else
 			vma_pagesize = transparent_hugepage_adjust(kvm, memslot,
 								   hva, &pfn,
