@@ -8241,6 +8241,45 @@ void hugetlb_unshare_all_pmds(struct vm_area_struct *vma)
 	mmu_notifier_invalidate_range_end(&range);
 }
 
+/*
+ * hugetlb_mapping_size - Get the size of the mapping for a
+ * particular address in the vma.
+ *
+ * Returns 0 if the page is not mapped.
+ */
+unsigned long hugetlb_mapping_size(struct vm_area_struct *vma,
+		unsigned long address)
+{
+	struct mm_struct *mm = vma->vm_mm;
+	struct hugetlb_pte hpte;
+	struct hstate *h = hstate_vma(vma);
+	unsigned long sz = huge_page_size(h);
+	pte_t *ptep = huge_pte_offset(mm, address, sz);
+	pte_t pte;
+
+	if (!ptep || !pte_present(*ptep))
+		return 0;
+
+	if (!hugetlb_hgm_enabled(vma))
+		return sz;
+
+retry:
+	hugetlb_vma_lock_read(vma);
+	hugetlb_pte_populate(&hpte, ptep, huge_page_shift(h),
+			hpage_size_to_level(sz));
+	hugetlb_hgm_walk(mm, vma, &hpte, address, PAGE_SIZE,
+			/*stop_at_none=*/true);
+	pte = hugetlb_pte_get(&hpte);
+	hugetlb_vma_unlock_read(vma);
+	if (pte_present(pte)) {
+		if (unlikely(!hugetlb_pte_present_leaf(&hpte, pte)))
+			goto retry;
+		return hugetlb_pte_size(&hpte);
+	}
+
+	return 0;
+}
+
 #ifdef CONFIG_CMA
 static bool cma_reserve_called __initdata;
 
