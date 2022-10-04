@@ -1044,22 +1044,24 @@ static inline void hugetlb_count_sub(long l, struct mm_struct *mm)
 	atomic_long_sub(l, &mm->hugetlb_usage);
 }
 
-#ifndef huge_ptep_modify_prot_start
-#define huge_ptep_modify_prot_start huge_ptep_modify_prot_start
-static inline pte_t huge_ptep_modify_prot_start(struct vm_area_struct *vma,
-						unsigned long addr, pte_t *ptep)
+#ifndef hugetlb_pte_modify_prot_start
+#define hugetlb_pte_modify_prot_start hugetlb_pte_modify_prot_start
+static inline pte_t hugetlb_pte_modify_prot_start(struct vm_area_struct *vma,
+						unsigned long addr,
+						struct hugetlb_pte *hpte)
 {
-	return huge_ptep_get_and_clear(vma->vm_mm, addr, ptep);
+	return hugetlb_pte_get_and_clear(vma->vm_mm, addr, hpte);
 }
 #endif
 
-#ifndef huge_ptep_modify_prot_commit
-#define huge_ptep_modify_prot_commit huge_ptep_modify_prot_commit
-static inline void huge_ptep_modify_prot_commit(struct vm_area_struct *vma,
-						unsigned long addr, pte_t *ptep,
+#ifndef hugetlb_pte_modify_prot_commit
+#define hugetlb_pte_modify_prot_commit hugetlb_pte_modify_prot_commit
+static inline void hugetlb_pte_modify_prot_commit(struct vm_area_struct *vma,
+						unsigned long addr,
+						struct hugetlb_pte *hpte,
 						pte_t old_pte, pte_t pte)
 {
-	set_huge_pte_at(vma->vm_mm, addr, ptep, pte);
+	set_hugetlb_pte_at(vma->vm_mm, addr, hpte, pte);
 }
 #endif
 
