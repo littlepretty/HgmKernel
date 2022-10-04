@@ -317,6 +317,9 @@ unsigned long hugetlb_change_protection(struct vm_area_struct *vma,
 bool is_hugetlb_entry_migration(pte_t pte);
 void hugetlb_unshare_all_pmds(struct vm_area_struct *vma);
 
+unsigned long hugetlb_mapping_size(struct vm_area_struct *vma,
+		unsigned long address);
+
 #else /* !CONFIG_HUGETLB_PAGE */
 
 static inline void hugetlb_dup_vma_private(struct vm_area_struct *vma)
@@ -1207,6 +1210,12 @@ static inline void hugetlb_unregister_node(struct node *node)
 }
 
 static inline hugetlb_level_t hpage_size_to_level(unsigned long sz)
+{
+	BUG();
+}
+
+unsigned long hugetlb_mapping_size(struct vm_area_struct *vma,
+		unsigned long address)
 {
 	BUG();
 }
