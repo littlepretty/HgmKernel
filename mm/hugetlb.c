@@ -6086,7 +6086,16 @@ int hugetlb_mcopy_atomic_pte(struct mm_struct *dst_mm,
 	 * preceding stores to the page contents become visible before
 	 * the set_pte_at() write.
 	 */
-	__SetPageUptodate(page);
+	if (!is_continue)
+		__SetPageUptodate(page);
+	else if (!PageUptodate(page)) {
+		/*
+		 * This should never happen; HugeTLB pages are always Uptodate
+		 * as soon as they are allocated.
+		 */
+		ret = -EFAULT;
+		goto out_release_nounlock;
+	}
 
 	/* Add shared, newly allocated pages to the page cache. */
 	if (vm_shared && !is_continue) {
