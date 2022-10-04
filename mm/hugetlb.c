@@ -8250,6 +8250,42 @@ void hugetlb_unshare_all_pmds(struct vm_area_struct *vma)
 	mmu_notifier_invalidate_range_end(&range);
 }
 
+/*
+ * hugetlb_mapping_size - Get the size of the mapping for a
+ * particular address in the vma.
+ *
+ * Returns 0 if the page is not mapped.
+ */
+unsigned long hugetlb_mapping_size(struct vm_area_struct *vma,
+		unsigned long address)
+{
+	struct hugetlb_pte hpte;
+	pte_t pte;
+	unsigned long mapping_sz = 0;
+
+	hugetlb_vma_lock_read(vma);
+
+	if (hugetlb_full_walk(&hpte, vma, address))
+		goto out;
+
+	pte = hugetlb_pte_get(&hpte);
+
+	if (!pte_present(pte))
+		goto out;
+
+	if (unlikely(!hugetlb_pte_present_leaf(&hpte, pte)))
+		/*
+		 * We raced with someone splitting, but this is only possible
+		 * if the pte was none to begin with.
+		 */
+		goto out;
+
+	mapping_sz = hugetlb_pte_size(&hpte);
+out:
+	hugetlb_vma_unlock_read(vma);
+	return mapping_sz;
+}
+
 #ifdef CONFIG_CMA
 static bool cma_reserve_called __initdata;
 
