@@ -52,7 +52,8 @@ static inline int huge_pte_uffd_wp(pte_t pte)
 	return pte_uffd_wp(pte);
 }
 
-#ifndef __HAVE_ARCH_HUGE_PTE_CLEAR
+#if !defined(__HAVE_ARCH_HUGE_PTE_CLEAR) && \
+	!defined(__HAVE_ARCH_HUGETLB_PTE_CLEAR)
 static inline void huge_pte_clear(struct mm_struct *mm, unsigned long addr,
 		    pte_t *ptep, unsigned long sz)
 {
@@ -69,7 +70,8 @@ static inline void hugetlb_free_pgd_range(struct mmu_gather *tlb,
 }
 #endif
 
-#ifndef __HAVE_ARCH_HUGE_SET_HUGE_PTE_AT
+#if !defined(__HAVE_ARCH_HUGE_SET_HUGE_PTE_AT) && \
+	!defined(__HAVE_ARCH_HUGE_SET_HUGETLB_PTE_AT)
 static inline void set_huge_pte_at(struct mm_struct *mm, unsigned long addr,
 		pte_t *ptep, pte_t pte)
 {
@@ -77,7 +79,8 @@ static inline void set_huge_pte_at(struct mm_struct *mm, unsigned long addr,
 }
 #endif
 
-#ifndef __HAVE_ARCH_HUGE_PTEP_GET_AND_CLEAR
+#if !defined(__HAVE_ARCH_HUGE_PTEP_GET_AND_CLEAR) && \
+	!defined(__HAVE_ARCH_HUGETLB_PTE_GET_AND_CLEAR)
 static inline pte_t huge_ptep_get_and_clear(struct mm_struct *mm,
 		unsigned long addr, pte_t *ptep)
 {
@@ -85,7 +88,8 @@ static inline pte_t huge_ptep_get_and_clear(struct mm_struct *mm,
 }
 #endif
 
-#ifndef __HAVE_ARCH_HUGE_PTEP_CLEAR_FLUSH
+#if !defined(__HAVE_ARCH_HUGE_PTEP_CLEAR_FLUSH) && \
+	!defined(__HAVE_ARCH_HUGETLB_PTE_CLEAR_FLUSH)
 static inline pte_t huge_ptep_clear_flush(struct vm_area_struct *vma,
 		unsigned long addr, pte_t *ptep)
 {
@@ -153,7 +157,8 @@ static inline int prepare_hugepage_range(struct file *file,
 }
 #endif
 
-#ifndef __HAVE_ARCH_HUGE_PTEP_SET_WRPROTECT
+#if !defined(__HAVE_ARCH_HUGE_PTEP_SET_WRPROTECT) && \
+	!defined(__HAVE_ARCH_HUGETLB_PTE_SET_WRPROTECT)
 static inline void huge_ptep_set_wrprotect(struct mm_struct *mm,
 		unsigned long addr, pte_t *ptep)
 {
@@ -161,7 +166,8 @@ static inline void huge_ptep_set_wrprotect(struct mm_struct *mm,
 }
 #endif
 
-#ifndef __HAVE_ARCH_HUGE_PTEP_SET_ACCESS_FLAGS
+#if !defined(__HAVE_ARCH_HUGE_PTEP_SET_ACCESS_FLAGS) && \
+	!defined(__HAVE_ARCH_HUGETLB_PTE_SET_ACCESS_FLAGS)
 static inline int huge_ptep_set_access_flags(struct vm_area_struct *vma,
 		unsigned long addr, pte_t *ptep,
 		pte_t pte, int dirty)
@@ -187,7 +193,8 @@ static inline int hugetlb_pte_set_access_flags(struct vm_area_struct *vma,
 }
 #endif
 
-#ifndef __HAVE_ARCH_HUGE_PTEP_GET
+#if !defined(__HAVE_ARCH_HUGE_PTEP_GET) && \
+	!defined(__HAVE_ARCH_HUGETLB_GET)
 static inline pte_t huge_ptep_get(pte_t *ptep)
 {
 	return ptep_get(ptep);
