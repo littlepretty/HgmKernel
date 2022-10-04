@@ -1021,7 +1021,9 @@ static int get_vma_page_shift(struct vm_area_struct *vma, unsigned long hva)
 	unsigned long pa;
 
 	if (is_vm_hugetlb_page(vma) && !(vma->vm_flags & VM_PFNMAP))
-		return huge_page_shift(hstate_vma(vma));
+		return !hugetlb_hgm_enabled(vma)
+			? huge_page_shift(hstate_vma(vma))
+			: PAGE_SHIFT;
 
 	if (!(vma->vm_flags & VM_PFNMAP))
 		return PAGE_SHIFT;
@@ -1256,10 +1258,14 @@ static int user_mem_abort(struct kvm_vcpu *vcpu, phys_addr_t fault_ipa,
 	if (vma_pagesize == PAGE_SIZE && !(force_pte || device)) {
 		if (fault_status == FSC_PERM && fault_granule > PAGE_SIZE)
 			vma_pagesize = fault_granule;
-		else
+		else if (!is_vm_hugetlb_page(vma))
 			vma_pagesize = transparent_hugepage_adjust(kvm, memslot,
 								   hva, &pfn,
 								   &fault_ipa);
+		else {
+			vma_pagesize = hugetlb_mapping_size(vma, hva);
+			BUG_ON(vma_pagesize == 0);
+		}
 	}
 
 	if (fault_status != FSC_PERM && !device && kvm_has_mte(kvm)) {
