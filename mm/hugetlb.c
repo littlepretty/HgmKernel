@@ -7026,7 +7026,7 @@ unsigned long hugetlb_change_protection(struct vm_area_struct *vma,
 		if (unlikely(pte_marker_uffd_wp(pte))) {
 			/*
 			 * This is changing a non-present pte into a none pte,
-			 * no need for huge_ptep_modify_prot_start/commit().
+			 * no need for hugetlb_pte_modify_prot_start/commit().
 			 */
 			if (uffd_wp_resolve)
 				hugetlb_pte_clear(mm, address, &hpte);
@@ -7044,8 +7044,8 @@ unsigned long hugetlb_change_protection(struct vm_area_struct *vma,
 				continue;
 			}
 
-			old_pte = huge_ptep_modify_prot_start(
-					vma, address, hpte.ptep);
+			old_pte = hugetlb_pte_modify_prot_start(
+					vma, address, &hpte);
 			pte = huge_pte_modify(old_pte, newprot);
 			pte = arch_make_huge_pte(
 					pte, shift, vma->vm_flags);
@@ -7053,8 +7053,8 @@ unsigned long hugetlb_change_protection(struct vm_area_struct *vma,
 				pte = huge_pte_mkuffd_wp(pte);
 			else if (uffd_wp_resolve)
 				pte = huge_pte_clear_uffd_wp(pte);
-			huge_ptep_modify_prot_commit(
-					vma, address, hpte.ptep,
+			hugetlb_pte_modify_prot_commit(
+					vma, address, &hpte,
 					old_pte, pte);
 			base_pages += hugetlb_pte_size(&hpte) / PAGE_SIZE;
 		} else {
