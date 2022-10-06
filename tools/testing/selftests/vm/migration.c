@@ -13,6 +13,7 @@
 #include <sys/types.h>
 #include <signal.h>
 #include <time.h>
+#include <sys/statfs.h>
 
 #define TWOMEG (2<<20)
 #define RUNTIME (60)
@@ -59,11 +60,12 @@ FIXTURE_TEARDOWN(migration)
 	free(self->pids);
 }
 
-int migrate(uint64_t *ptr, int n1, int n2)
+int migrate(uint64_t *ptr, int n1, int n2, int retries)
 {
 	int ret, tmp;
 	int status = 0;
 	struct timespec ts1, ts2;
+	int failed = 0;
 
 	if (clock_gettime(CLOCK_MONOTONIC, &ts1))
 		return -1;
@@ -78,6 +80,9 @@ int migrate(uint64_t *ptr, int n1, int n2)
 		ret = move_pages(0, 1, (void **) &ptr, &n2, &status,
 				MPOL_MF_MOVE_ALL);
 		if (ret) {
+			if (++failed < retries)
+				continue;
+
 			if (ret > 0)
 				printf("Didn't migrate %d pages\n", ret);
 			else
@@ -88,6 +93,7 @@ int migrate(uint64_t *ptr, int n1, int n2)
 		tmp = n2;
 		n2 = n1;
 		n1 = tmp;
+		failed = 0;
 	}
 
 	return 0;
@@ -128,7 +134,7 @@ TEST_F_TIMEOUT(migration, private_anon, 2*RUNTIME)
 		if (pthread_create(&self->threads[i], NULL, access_mem, ptr))
 			perror("Couldn't create thread");
 
-	ASSERT_EQ(migrate(ptr, self->n1, self->n2), 0);
+	ASSERT_EQ(migrate(ptr, self->n1, self->n2, 1), 0);
 	for (i = 0; i < self->nthreads - 1; i++)
 		ASSERT_EQ(pthread_cancel(self->threads[i]), 0);
 }
@@ -158,7 +164,7 @@ TEST_F_TIMEOUT(migration, shared_anon, 2*RUNTIME)
 			self->pids[i] = pid;
 	}
 
-	ASSERT_EQ(migrate(ptr, self->n1, self->n2), 0);
+	ASSERT_EQ(migrate(ptr, self->n1, self->n2, 1), 0);
 	for (i = 0; i < self->nthreads - 1; i++)
 		ASSERT_EQ(kill(self->pids[i], SIGTERM), 0);
 }
@@ -185,9 +191,78 @@ TEST_F_TIMEOUT(migration, private_anon_thp, 2*RUNTIME)
 		if (pthread_create(&self->threads[i], NULL, access_mem, ptr))
 			perror("Couldn't create thread");
 
-	ASSERT_EQ(migrate(ptr, self->n1, self->n2), 0);
+	ASSERT_EQ(migrate(ptr, self->n1, self->n2, 1), 0);
 	for (i = 0; i < self->nthreads - 1; i++)
 		ASSERT_EQ(pthread_cancel(self->threads[i]), 0);
+}
+
+/*
+ * Tests the anon hugetlb migration entry paths.
+ */
+TEST_F_TIMEOUT(migration, private_anon_hugetlb, 2*RUNTIME)
+{
+	uint64_t *ptr;
+	int i;
+
+	if (self->nthreads < 2 || self->n1 < 0 || self->n2 < 0)
+		SKIP(return, "Not enough threads or NUMA nodes available");
+
+	ptr = mmap(NULL, TWOMEG, PROT_READ | PROT_WRITE,
+		MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB, -1, 0);
+	if (ptr == MAP_FAILED)
+		SKIP(return, "Could not allocate hugetlb pages");
+
+	memset(ptr, 0xde, TWOMEG);
+	for (i = 0; i < self->nthreads - 1; i++)
+		if (pthread_create(&self->threads[i], NULL, access_mem, ptr))
+			perror("Couldn't create thread");
+
+	ASSERT_EQ(migrate(ptr, self->n1, self->n2, 1), 0);
+	for (i = 0; i < self->nthreads - 1; i++)
+		ASSERT_EQ(pthread_cancel(self->threads[i]), 0);
+}
+
+/*
+ * Tests the shared hugetlb migration entry paths.
+ */
+TEST_F_TIMEOUT(migration, shared_hugetlb, 2*RUNTIME)
+{
+	uint64_t *ptr;
+	int i;
+	int fd;
+	unsigned long sz;
+	struct statfs filestat;
+
+	if (self->nthreads < 2 || self->n1 < 0 || self->n2 < 0)
+		SKIP(return, "Not enough threads or NUMA nodes available");
+
+	fd = memfd_create("tmp_hugetlb", MFD_HUGETLB);
+	if (fd < 0)
+		SKIP(return, "Couldn't create hugetlb memfd");
+
+	if (fstatfs(fd, &filestat) < 0)
+		SKIP(return, "Couldn't fstatfs hugetlb file");
+
+	sz = filestat.f_bsize;
+
+	if (ftruncate(fd, sz))
+		SKIP(return, "Couldn't allocate hugetlb pages");
+	ptr = mmap(NULL, sz, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+	if (ptr == MAP_FAILED)
+		SKIP(return, "Could not map hugetlb pages");
+
+	memset(ptr, 0xde, sz);
+	for (i = 0; i < self->nthreads - 1; i++)
+		if (pthread_create(&self->threads[i], NULL, access_mem, ptr))
+			perror("Couldn't create thread");
+
+	ASSERT_EQ(migrate(ptr, self->n1, self->n2, 10), 0);
+	for (i = 0; i < self->nthreads - 1; i++) {
+		ASSERT_EQ(pthread_cancel(self->threads[i]), 0);
+		pthread_join(self->threads[i], NULL);
+	}
+	ftruncate(fd, 0);
+	close(fd);
 }
 
 TEST_HARNESS_MAIN
