@@ -367,9 +367,9 @@ static inline int hugepage_madvise(struct vm_area_struct *vma,
 	return -EINVAL;
 }
 
-static inline int madvise_collapse(struct vm_area_struct *vma,
-				   struct vm_area_struct **prev,
-				   unsigned long start, unsigned long end)
+static inline int madvise_collapse_thp(struct vm_area_struct *vma,
+				       struct vm_area_struct **prev,
+				       unsigned long start, unsigned long end)
 {
 	return -EINVAL;
 }
