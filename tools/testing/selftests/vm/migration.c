@@ -13,6 +13,8 @@
 #include <sys/types.h>
 #include <signal.h>
 #include <time.h>
+#include <linux/userfaultfd.h>
+#include <sys/ioctl.h>
 
 #define TWOMEG (2<<20)
 #define RUNTIME (60)
@@ -233,6 +235,101 @@ TEST_F_TIMEOUT(migration, shared_hugetlb, 2*RUNTIME)
 	ptr = mmap(NULL, TWOMEG, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
 	if (ptr == MAP_FAILED)
 		SKIP(return, "Could not allocate hugetlb pages");
+
+	memset(ptr, 0xde, TWOMEG);
+	for (i = 0; i < self->nthreads - 1; i++)
+		if (pthread_create(&self->threads[i], NULL, access_mem, ptr))
+			perror("Couldn't create thread");
+
+	ASSERT_EQ(migrate(ptr, self->n1, self->n2), 0);
+	for (i = 0; i < self->nthreads - 1; i++)
+		ASSERT_EQ(pthread_cancel(self->threads[i]), 0);
+	ftruncate(fd, 0);
+	close(fd);
+}
+
+#ifdef __NR_userfaultfd
+static int map_at_high_granularity(char *mem, size_t length)
+{
+	int i;
+	int ret;
+	int uffd = syscall(__NR_userfaultfd, 0);
+	struct uffdio_api api;
+	struct uffdio_register reg;
+	int pagesize = getpagesize();
+	if (uffd < 0) {
+		perror("couldn't create uffd");
+		return uffd;
+	}
+
+	api.api = UFFD_API;
+	api.features = UFFD_FEATURE_MINOR_HUGETLBFS_HGM;
+	if ((ret = ioctl(uffd, UFFDIO_API, &api)) < 0 || api.api != UFFD_API) {
+		perror("UFFDIO_API failed");
+		return ret;
+	}
+
+	reg.range.start = (unsigned long long)mem;
+	reg.range.len = length;
+	reg.mode = 0;
+	if ((ret = ioctl(uffd, UFFDIO_REGISTER, &reg)) < 0) {
+		perror("UFFDIO_REGISTER failed");
+		return ret;
+	}
+
+	/* UFFDIO_CONTINUE each 4K segment of the 2M page. */
+	for (i = 0; i < length/pagesize; ++i) {
+		struct uffdio_continue cont;
+		cont.range.start = (unsigned long long)mem + i * pagesize;
+		cont.range.len = pagesize;
+		cont.mode = 0;
+		if ((ret = ioctl(uffd, UFFDIO_CONTINUE, &cont)) < 0) {
+			fprintf(stderr, "UFFDIO_CONTINUE failed "
+					"for %llx -> %llx: %d\n",
+					cont.range.start,
+					cont.range.start + cont.range.len,
+					ret);
+			return ret;
+		}
+	}
+
+	/* We don't need userfaultfd anymore. */
+	close(uffd);
+	return 0;
+}
+#else
+static int map_at_high_granularity(char *mem, size_t length)
+{
+	fprintf(stderr, "Userfaultfd missing\n");
+	return -1;
+}
+#endif /* __NR_userfaultfd */
+
+/*
+ * Tests the high-granularity hugetlb migration entry paths.
+ */
+TEST_F_TIMEOUT(migration, shared_hugetlb_hgm, 2*RUNTIME)
+{
+	uint64_t *ptr;
+	int i;
+	int fd;
+
+	if (self->nthreads < 2 || self->n1 < 0 || self->n2 < 0)
+		SKIP(return, "Not enough threads or NUMA nodes available");
+
+	fd = memfd_create("tmp_hugetlb", MFD_HUGETLB);
+	ftruncate(fd, TWOMEG);
+	ptr = mmap(NULL, TWOMEG, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+	if (ptr == MAP_FAILED)
+		SKIP(return, "Could not allocate hugetlb pages");
+
+
+	/*
+	 * We have to map_at_high_granularity before we memset, otherwise
+	 * memset will map everything at 2M.
+	 */
+	if (map_at_high_granularity((char *)ptr, TWOMEG) < 0)
+		SKIP(return, "Could not map HugeTLB range at high granularity");
 
 	memset(ptr, 0xde, TWOMEG);
 	for (i = 0; i < self->nthreads - 1; i++)
