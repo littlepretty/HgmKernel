@@ -6961,21 +6961,30 @@ static unsigned long page_table_shareable(struct vm_area_struct *svma,
 	return saddr;
 }
 
-bool want_pmd_share(struct vm_area_struct *vma, unsigned long addr)
+static bool pmd_sharing_possible(struct vm_area_struct *vma)
 {
-	unsigned long start = addr & PUD_MASK;
-	unsigned long end = start + PUD_SIZE;
-
 #ifdef CONFIG_USERFAULTFD
 	if (uffd_disable_huge_pmd_share(vma))
 		return false;
 #endif
 	/*
-	 * check on proper vm_flags and page table alignment
+	 * Only shared VMAs can share PMDs.
 	 */
 	if (!(vma->vm_flags & VM_MAYSHARE))
 		return false;
 	if (!vma->vm_private_data)	/* vma lock required for sharing */
+		return false;
+	return true;
+}
+
+bool want_pmd_share(struct vm_area_struct *vma, unsigned long addr)
+{
+	unsigned long start = addr & PUD_MASK;
+	unsigned long end = start + PUD_SIZE;
+	/*
+	 * check on proper vm_flags and page table alignment
+	 */
+	if (!pmd_sharing_possible(vma))
 		return false;
 	if (!range_in_vma(vma, start, end))
 		return false;
@@ -6997,7 +7006,7 @@ void adjust_range_if_pmd_sharing_possible(struct vm_area_struct *vma,
 	 * vma needs to span at least one aligned PUD size, and the range
 	 * must be at least partially within in.
 	 */
-	if (!(vma->vm_flags & VM_MAYSHARE) || !(v_end > v_start) ||
+	if (!pmd_sharing_possible(vma) || !(v_end > v_start) ||
 		(*end <= v_start) || (*start >= v_end))
 		return;
 
