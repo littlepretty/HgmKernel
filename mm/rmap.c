@@ -47,7 +47,8 @@
  *
  * hugetlbfs PageHuge() take locks in this order:
  *   hugetlb_fault_mutex (hugetlbfs specific page fault mutex)
- *     vma_lock (hugetlb specific lock for pmd_sharing)
+ *     vma_lock (hugetlb specific lock for pmd_sharing and high-granularity
+ *               mapping)
  *       mapping->i_mmap_rwsem (also used for hugetlb pmd sharing)
  *         page->flags PG_locked (lock_page)
  */
