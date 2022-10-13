@@ -383,18 +383,33 @@ static void hugetlb_delete_from_page_cache(struct folio *folio)
  * mutex for the page in the mapping.  So, we can not race with page being
  * faulted into the vma.
  */
-static bool hugetlb_vma_maps_page(struct vm_area_struct *vma,
-				unsigned long addr, struct page *page)
+static bool hugetlb_vma_maybe_maps_page(struct vm_area_struct *vma,
+					unsigned long addr, struct page *page)
 {
 	pte_t *ptep, pte;
+	struct hugetlb_pte hpte;
+	struct hstate *h = hstate_vma(vma);
 
-	ptep = hugetlb_walk(vma, addr, huge_page_size(hstate_vma(vma)));
+	ptep = hugetlb_walk(vma, addr, huge_page_size(h));
+
 	if (!ptep)
 		return false;
+
+	hugetlb_pte_populate(&hpte, ptep, huge_page_shift(h),
+			hpage_size_to_level(huge_page_size(h)));
 
 	pte = huge_ptep_get(ptep);
 	if (huge_pte_none(pte) || !pte_present(pte))
 		return false;
+
+	if (!hugetlb_pte_present_leaf(&hpte, pte))
+		/*
+		 * The top-level PTE is not a leaf, so it's possible that a PTE
+		 * under us is mapping the page. We aren't holding the VMA
+		 * lock, so it is unsafe to continue the walk further. Instead,
+		 * return true to indicate that we might be mapping the page.
+		 */
+		return true;
 
 	if (pte_page(pte) == page)
 		return true;
@@ -457,7 +472,7 @@ retry:
 		v_start = vma_offset_start(vma, start);
 		v_end = vma_offset_end(vma, end);
 
-		if (!hugetlb_vma_maps_page(vma, v_start, page))
+		if (!hugetlb_vma_maybe_maps_page(vma, v_start, page))
 			continue;
 
 		if (!hugetlb_vma_trylock_write(vma)) {
@@ -507,7 +522,7 @@ retry:
 		 */
 		v_start = vma_offset_start(vma, start);
 		v_end = vma_offset_end(vma, end);
-		if (hugetlb_vma_maps_page(vma, v_start, page))
+		if (hugetlb_vma_maybe_maps_page(vma, v_start, page))
 			unmap_hugepage_range(vma, v_start, v_end, NULL,
 					     ZAP_FLAG_DROP_MARKER);
 
