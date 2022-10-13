@@ -141,6 +141,18 @@ struct file_region {
 #endif
 };
 
+/*
+ * The HugeTLB VMA lock is used to synchronize HugeTLB page table walks.
+ * Right now, it is only used for VM_SHARED mappings.
+ * - The read lock is held when we want to stabilize mappings (prevent PMD
+ *   unsharing or MADV_COLLAPSE for high-granularity mappings).
+ * - The write lock is held when we want to free mappings (PMD unsharing and
+ *   MADV_COLLAPSE for high-granularity mappings).
+ *
+ * Note: For PMD unsharing and MADV_COLLAPSE, the i_mmap_rwsem is held for
+ * writing as well, so page table walkers will also be safe if they hold
+ * i_mmap_rwsem for at least reading. See hugetlb_walk() for more information.
+ */
 struct hugetlb_vma_lock {
 	struct kref refs;
 	struct rw_semaphore rw_sema;
