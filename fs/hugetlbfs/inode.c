@@ -386,17 +386,24 @@ static void hugetlb_delete_from_page_cache(struct folio *folio)
 static bool hugetlb_vma_maps_page(struct vm_area_struct *vma,
 				unsigned long addr, struct page *page)
 {
-	pte_t *ptep, pte;
+	pte_t pte;
+	struct hugetlb_pte hpte;
 
-	ptep = hugetlb_walk(vma, addr, huge_page_size(hstate_vma(vma)));
-	if (!ptep)
+	if (hugetlb_full_walk(&hpte, vma, addr))
 		return false;
 
-	pte = huge_ptep_get(ptep);
+	pte = huge_ptep_get(hpte.ptep);
 	if (huge_pte_none(pte) || !pte_present(pte))
 		return false;
 
-	if (pte_page(pte) == page)
+	if (unlikely(!hugetlb_pte_present_leaf(&hpte, pte)))
+		/*
+		 * We raced with someone splitting us, and the only case
+		 * where this is impossible is when the pte was none.
+		 */
+		return false;
+
+	if (compound_head(pte_page(pte)) == page)
 		return true;
 
 	return false;
