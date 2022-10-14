@@ -1456,10 +1456,11 @@ static bool try_to_unmap_one(struct folio *folio, struct vm_area_struct *vma,
 	struct mm_struct *mm = vma->vm_mm;
 	DEFINE_FOLIO_VMA_WALK(pvmw, folio, vma, address, 0);
 	pte_t pteval;
-	struct page *subpage;
+	struct page *subpage, *page_flags_page;
 	bool anon_exclusive, ret = true;
 	struct mmu_notifier_range range;
 	enum ttu_flags flags = (enum ttu_flags)(long)arg;
+	bool page_poisoned;
 
 	/*
 	 * When racing against e.g. zap_pte_range() on another cpu,
@@ -1512,9 +1513,17 @@ static bool try_to_unmap_one(struct folio *folio, struct vm_area_struct *vma,
 
 		subpage = folio_page(folio,
 					pte_pfn(*pvmw.pte) - folio_pfn(folio));
+		/*
+		 * We check the page flags of HugeTLB pages by checking the
+		 * head page.
+		 */
+		page_flags_page = folio_test_hugetlb(folio)
+			? &folio->page
+			: subpage;
+		page_poisoned = PageHWPoison(page_flags_page);
 		address = pvmw.address;
 		anon_exclusive = folio_test_anon(folio) &&
-				 PageAnonExclusive(subpage);
+				 PageAnonExclusive(page_flags_page);
 
 		if (folio_test_hugetlb(folio)) {
 			bool anon = folio_test_anon(folio);
@@ -1523,7 +1532,7 @@ static bool try_to_unmap_one(struct folio *folio, struct vm_area_struct *vma,
 			 * The try_to_unmap() is only passed a hugetlb page
 			 * in the case where the hugetlb page is poisoned.
 			 */
-			VM_BUG_ON_PAGE(!PageHWPoison(subpage), subpage);
+			VM_BUG_ON_FOLIO(!page_poisoned, folio);
 			/*
 			 * huge_pmd_unshare may unmap an entire PMD page.
 			 * There is no way of knowing exactly which PMDs may
@@ -1606,7 +1615,7 @@ static bool try_to_unmap_one(struct folio *folio, struct vm_area_struct *vma,
 		/* Update high watermark before we lower rss */
 		update_hiwater_rss(mm);
 
-		if (PageHWPoison(subpage) && !(flags & TTU_IGNORE_HWPOISON)) {
+		if (page_poisoned && !(flags & TTU_IGNORE_HWPOISON)) {
 			pteval = swp_entry_to_pte(make_hwpoison_entry(subpage));
 			if (folio_test_hugetlb(folio)) {
 				hugetlb_count_sub(1UL << pvmw.pte_order, mm);
@@ -1632,7 +1641,9 @@ static bool try_to_unmap_one(struct folio *folio, struct vm_area_struct *vma,
 			mmu_notifier_invalidate_range(mm, address,
 						      address + PAGE_SIZE);
 		} else if (folio_test_anon(folio)) {
-			swp_entry_t entry = { .val = page_private(subpage) };
+			swp_entry_t entry = {
+				.val = page_private(page_flags_page)
+			};
 			pte_t swp_pte;
 			/*
 			 * Store the swap location in the pte.
@@ -1831,7 +1842,7 @@ static bool try_to_migrate_one(struct folio *folio, struct vm_area_struct *vma,
 	struct mm_struct *mm = vma->vm_mm;
 	DEFINE_FOLIO_VMA_WALK(pvmw, folio, vma, address, 0);
 	pte_t pteval;
-	struct page *subpage;
+	struct page *subpage, *page_flags_page;
 	bool anon_exclusive, ret = true;
 	struct mmu_notifier_range range;
 	enum ttu_flags flags = (enum ttu_flags)(long)arg;
@@ -1911,9 +1922,16 @@ static bool try_to_migrate_one(struct folio *folio, struct vm_area_struct *vma,
 			subpage = folio_page(folio,
 					pte_pfn(*pvmw.pte) - folio_pfn(folio));
 		}
+		/*
+		 * We check the page flags of HugeTLB pages by checking the
+		 * head page.
+		 */
+		page_flags_page = folio_test_hugetlb(folio)
+			? &folio->page
+			: subpage;
 		address = pvmw.address;
 		anon_exclusive = folio_test_anon(folio) &&
-				 PageAnonExclusive(subpage);
+				 PageAnonExclusive(page_flags_page);
 
 		if (folio_test_hugetlb(folio)) {
 			bool anon = folio_test_anon(folio);
@@ -2032,7 +2050,7 @@ static bool try_to_migrate_one(struct folio *folio, struct vm_area_struct *vma,
 			 * No need to invalidate here it will synchronize on
 			 * against the special swap migration pte.
 			 */
-		} else if (PageHWPoison(subpage)) {
+		} else if (PageHWPoison(page_flags_page)) {
 			pteval = swp_entry_to_pte(make_hwpoison_entry(subpage));
 			if (folio_test_hugetlb(folio)) {
 				hugetlb_count_sub(1L << pvmw.pte_order, mm);
