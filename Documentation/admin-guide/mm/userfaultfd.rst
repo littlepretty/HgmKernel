@@ -169,7 +169,13 @@ like to do to resolve it:
   the page cache). Userspace has the option of modifying the page's
   contents before resolving the fault. Once the contents are correct
   (modified or not), userspace asks the kernel to map the page and let the
-  faulting thread continue with ``UFFDIO_CONTINUE``.
+  faulting thread continue with ``UFFDIO_CONTINUE``. If this is done at the
+  base-page size in a transparent-hugepage-eligible VMA or in a HugeTLB VMA
+  (requires ``MADV_SPLIT``), then userspace may want to use
+  ``MADV_COLLAPSE`` when a hugepage is fully populated to inform the kernel
+  that it may be able to collapse the mapping. ``MADV_COLLAPSE`` will undo
+  the effect of any ``UFFDIO_WRITEPROTECT`` calls on the collapsed address
+  range.
 
 Notes:
 
