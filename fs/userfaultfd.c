@@ -1484,6 +1484,15 @@ static int userfaultfd_register(struct userfaultfd_ctx *ctx,
 	next:
 		if (is_vm_hugetlb_page(vma) && (ctx->features &
 					UFFD_FEATURE_MINOR_HUGETLBFS_HGM)) {
+			if (!(ctx->features & UFFD_FEATURE_EXACT_ADDRESS)) {
+				/*
+				 * UFFD_FEATURE_MINOR_HUGETLBFS_HGM is mostly
+				 * useless without UFFD_FEATURE_EXACT_ADDRESS,
+				 * so require userspace to provide both.
+				 */
+				ret = -EINVAL;
+				break;
+			}
 			ret = enable_hugetlb_hgm(vma);
 			if (ret)
 				break;
