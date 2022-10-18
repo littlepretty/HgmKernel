@@ -115,6 +115,14 @@ events, except page fault notifications, may be generated:
   areas. ``UFFD_FEATURE_MINOR_SHMEM`` is the analogous feature indicating
   support for shmem virtual memory areas.
 
+- ``UFFD_FEATURE_MINOR_HUGETLBFS_HGM`` indicates that the kernel supports
+  small-page-aligned regions for ``UFFDIO_CONTINUE`` in HugeTLB-backed
+  virtual memory areas. ``UFFD_FEATURE_MINOR_HUGETLBFS_HGM`` and
+  ``UFFD_FEATURE_EXACT_ADDRESS`` must both be specified explicitly to enable
+  this behavior. If ``UFFD_FEATURE_MINOR_HUGETLBFS_HGM`` is specified but
+  ``UFFD_FEATURE_EXACT_ADDRESS`` is not, then ``UFFDIO_API`` will fail with
+  ``EINVAL``.
+
 The userland application should set the feature flags it intends to use
 when invoking the ``UFFDIO_API`` ioctl, to request that those features be
 enabled if supported.
@@ -169,7 +177,13 @@ like to do to resolve it:
   the page cache). Userspace has the option of modifying the page's
   contents before resolving the fault. Once the contents are correct
   (modified or not), userspace asks the kernel to map the page and let the
-  faulting thread continue with ``UFFDIO_CONTINUE``.
+  faulting thread continue with ``UFFDIO_CONTINUE``. If this is done at the
+  base-page size in a transparent-hugepage-eligible VMA or in a HugeTLB VMA
+  (requires ``UFFD_FEATURE_MINOR_HUGETLBFS_HGM``), then userspace may want to
+  use ``MADV_COLLAPSE`` when a hugepage is fully populated to inform the kernel
+  that it may be able to collapse the mapping. ``MADV_COLLAPSE`` will may undo
+  the effect of any ``UFFDIO_WRITEPROTECT`` calls on the collapsed address
+  range.
 
 Notes:
 
