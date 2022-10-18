@@ -1989,6 +1989,17 @@ static int userfaultfd_api(struct userfaultfd_ctx *ctx,
 		~(UFFD_FEATURE_MINOR_HUGETLBFS | UFFD_FEATURE_MINOR_SHMEM);
 #ifndef CONFIG_HUGETLB_HIGH_GRANULARITY_MAPPING
 	uffdio_api.features &= ~UFFD_FEATURE_MINOR_HUGETLBFS_HGM;
+#else
+
+	ret = -EINVAL;
+	if ((uffdio_api.features & UFFD_FEATURE_MINOR_HUGETLBFS_HGM) &&
+	    !(uffdio_api.features & UFFD_FEATURE_EXACT_ADDRESS))
+		/*
+		 * UFFD_FEATURE_MINOR_HUGETLBFS_HGM is mostly
+		 * useless without UFFD_FEATURE_EXACT_ADDRESS,
+		 * so require userspace to provide both.
+		 */
+		goto err_out;
 #endif  /* CONFIG_HUGETLB_HIGH_GRANULARITY_MAPPING */
 #endif  /* CONFIG_HAVE_ARCH_USERFAULTFD_MINOR */
 
