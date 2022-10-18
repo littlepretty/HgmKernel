@@ -454,6 +454,10 @@ errno set to EINVAL or exclude hugetlb pages that extend beyond the length if
 not hugepage aligned.  For example, munmap(2) will fail if memory is backed by
 a hugetlb page and the length is smaller than the hugepage size.
 
+It is possible for users to map HugeTLB pages at a higher granularity than
+normal using HugeTLB high-granularity mapping (HGM). For example, when using 1G
+pages on x86, a user could map that page with 4K PTEs, 2M PMDs, a combination of
+the two. See Documentation/admin-guide/mm/userfaultfd.rst.
 
 Examples
 ========
