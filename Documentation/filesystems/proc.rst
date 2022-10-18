@@ -445,29 +445,32 @@ Memory Area, or VMA) there is a series of lines such as the following::
 
     08048000-080bc000 r-xp 00000000 03:02 13130      /bin/bash
 
-    Size:               1084 kB
-    KernelPageSize:        4 kB
-    MMUPageSize:           4 kB
-    Rss:                 892 kB
-    Pss:                 374 kB
-    Pss_Dirty:             0 kB
-    Shared_Clean:        892 kB
-    Shared_Dirty:          0 kB
-    Private_Clean:         0 kB
-    Private_Dirty:         0 kB
-    Referenced:          892 kB
-    Anonymous:             0 kB
-    LazyFree:              0 kB
-    AnonHugePages:         0 kB
-    ShmemPmdMapped:        0 kB
-    Shared_Hugetlb:        0 kB
-    Private_Hugetlb:       0 kB
-    Swap:                  0 kB
-    SwapPss:               0 kB
-    KernelPageSize:        4 kB
-    MMUPageSize:           4 kB
-    Locked:                0 kB
-    THPeligible:           0
+    Size:                 1084 kB
+    KernelPageSize:          4 kB
+    MMUPageSize:             4 kB
+    Rss:                   892 kB
+    Pss:                   374 kB
+    Pss_Dirty:               0 kB
+    Shared_Clean:          892 kB
+    Shared_Dirty:            0 kB
+    Private_Clean:           0 kB
+    Private_Dirty:           0 kB
+    Referenced:            892 kB
+    Anonymous:               0 kB
+    LazyFree:                0 kB
+    AnonHugePages:           0 kB
+    ShmemPmdMapped:          0 kB
+    Shared_Hugetlb:          0 kB
+    Private_Hugetlb:         0 kB
+    HugetlbPudMapped:        0 kB
+    HugetlbPmdMapped:        0 kB
+    HugetlbPteMapped:        0 kB
+    Swap:                    0 kB
+    SwapPss:                 0 kB
+    KernelPageSize:          4 kB
+    MMUPageSize:             4 kB
+    Locked:                  0 kB
+    THPeligible:             0
     VmFlags: rd ex mr mw me dw
 
 The first of these lines shows the same information as is displayed for the
@@ -508,9 +511,14 @@ implementation. If this is not desirable please file a bug report.
 "ShmemPmdMapped" shows the ammount of shared (shmem/tmpfs) memory backed by
 huge pages.
 
-"Shared_Hugetlb" and "Private_Hugetlb" show the ammounts of memory backed by
+"Shared_Hugetlb" and "Private_Hugetlb" show the amounts of memory backed by
 hugetlbfs page which is *not* counted in "RSS" or "PSS" field for historical
 reasons. And these are not included in {Shared,Private}_{Clean,Dirty} field.
+
+If the kernel was compiled with ``CONFIG_HUGETLB_HIGH_GRANULARITY_MAPPING``,
+"HugetlbPudMapped", "HugetlbPmdMapped", and "HugetlbPteMapped" will appear and
+show the amount of HugeTLB memory mapped with PUDs, PMDs, and PTEs respectively.
+See Documentation/admin-guide/mm/hugetlbpage.rst.
 
 "Swap" shows how much would-be-anonymous memory is also used, but out on swap.
 
