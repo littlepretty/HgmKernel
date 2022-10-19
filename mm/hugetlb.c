@@ -5175,16 +5175,16 @@ again:
 	return ret;
 }
 
-static void move_huge_pte(struct vm_area_struct *vma, unsigned long old_addr,
-			  unsigned long new_addr, pte_t *src_pte, pte_t *dst_pte)
+static void move_hugetlb_pte(struct vm_area_struct *vma, unsigned long old_addr,
+			     unsigned long new_addr, struct hugetlb_pte *src_hpte,
+			     struct hugetlb_pte *dst_hpte)
 {
-	struct hstate *h = hstate_vma(vma);
 	struct mm_struct *mm = vma->vm_mm;
 	spinlock_t *src_ptl, *dst_ptl;
 	pte_t pte;
 
-	dst_ptl = huge_pte_lock(h, mm, dst_pte);
-	src_ptl = huge_pte_lockptr(huge_page_shift(h), mm, src_pte);
+	dst_ptl = hugetlb_pte_lock(mm, dst_hpte);
+	src_ptl = hugetlb_pte_lockptr(mm, src_hpte);
 
 	/*
 	 * We don't have to worry about the ordering of src and dst ptlocks
@@ -5193,8 +5193,8 @@ static void move_huge_pte(struct vm_area_struct *vma, unsigned long old_addr,
 	if (src_ptl != dst_ptl)
 		spin_lock_nested(src_ptl, SINGLE_DEPTH_NESTING);
 
-	pte = huge_ptep_get_and_clear(mm, old_addr, src_pte);
-	set_huge_pte_at(mm, new_addr, dst_pte, pte);
+	pte = huge_ptep_get_and_clear(mm, old_addr, src_hpte->ptep);
+	set_huge_pte_at(mm, new_addr, dst_hpte->ptep, pte);
 
 	if (src_ptl != dst_ptl)
 		spin_unlock(src_ptl);
@@ -5215,6 +5215,7 @@ int move_hugetlb_page_tables(struct vm_area_struct *vma,
 	pte_t *src_pte, *dst_pte;
 	struct mmu_notifier_range range;
 	bool shared_pmd = false;
+	struct hugetlb_pte src_hpte, dst_hpte;
 
 	mmu_notifier_range_init(&range, MMU_NOTIFY_CLEAR, 0, vma, mm, old_addr,
 				old_end);
@@ -5230,20 +5231,28 @@ int move_hugetlb_page_tables(struct vm_area_struct *vma,
 	/* Prevent race with file truncation */
 	hugetlb_vma_lock_write(vma);
 	i_mmap_lock_write(mapping);
-	for (; old_addr < old_end; old_addr += sz, new_addr += sz) {
+	while (old_addr < old_end) {
 		src_pte = hugetlb_walk(vma, old_addr, sz);
 		if (!src_pte) {
-			old_addr |= last_addr_mask;
-			new_addr |= last_addr_mask;
+			old_addr = (old_addr | last_addr_mask) + sz;
+			new_addr = (new_addr | last_addr_mask) + sz;
 			continue;
 		}
-		if (huge_pte_none(huge_ptep_get(src_pte)))
-			continue;
 
-		if (huge_pmd_unshare(mm, vma, old_addr, src_pte)) {
+		hugetlb_pte_populate(&src_hpte, src_pte, huge_page_shift(h),
+				     hpage_size_to_level(sz));
+		hugetlb_hgm_walk(mm, vma, &src_hpte, old_addr,
+				PAGE_SIZE, /*stop_at_none=*/true);
+		if (huge_pte_none(huge_ptep_get(src_hpte.ptep))) {
+			old_addr += hugetlb_pte_size(&src_hpte);
+			new_addr += hugetlb_pte_size(&src_hpte);
+			continue;
+		}
+
+		if (huge_pmd_unshare(mm, vma, old_addr, src_hpte.ptep)) {
 			shared_pmd = true;
-			old_addr |= last_addr_mask;
-			new_addr |= last_addr_mask;
+			old_addr = (old_addr | last_addr_mask) + sz;
+			new_addr = (new_addr | last_addr_mask) + sz;
 			continue;
 		}
 
@@ -5251,7 +5260,15 @@ int move_hugetlb_page_tables(struct vm_area_struct *vma,
 		if (!dst_pte)
 			break;
 
-		move_huge_pte(vma, old_addr, new_addr, src_pte, dst_pte);
+		hugetlb_pte_populate(&dst_hpte, dst_pte, huge_page_shift(h),
+				     hpage_size_to_level(sz));
+		if (hugetlb_hgm_walk(mm, vma, &dst_hpte, new_addr,
+				     hugetlb_pte_size(&src_hpte),
+				     /*stop_at_none=*/false))
+			break;
+		move_hugetlb_pte(vma, old_addr, new_addr, &src_hpte, &dst_hpte);
+		old_addr += hugetlb_pte_size(&src_hpte);
+		new_addr += hugetlb_pte_size(&src_hpte);
 	}
 
 	if (shared_pmd)
