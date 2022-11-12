@@ -46,12 +46,14 @@
 	 (__u64)1 << _UFFDIO_API)
 #define UFFD_API_RANGE_IOCTLS			\
 	((__u64)1 << _UFFDIO_WAKE |		\
+	 (__u64)1 << _UFFDIO_WAKE_THREAD |		\
 	 (__u64)1 << _UFFDIO_COPY |		\
 	 (__u64)1 << _UFFDIO_ZEROPAGE |		\
 	 (__u64)1 << _UFFDIO_WRITEPROTECT |	\
 	 (__u64)1 << _UFFDIO_CONTINUE)
 #define UFFD_API_RANGE_IOCTLS_BASIC		\
 	((__u64)1 << _UFFDIO_WAKE |		\
+	 (__u64)1 << _UFFDIO_WAKE_THREAD |		\
 	 (__u64)1 << _UFFDIO_COPY |		\
 	 (__u64)1 << _UFFDIO_CONTINUE |		\
 	 (__u64)1 << _UFFDIO_WRITEPROTECT)
@@ -71,6 +73,7 @@
 #define _UFFDIO_ZEROPAGE		(0x04)
 #define _UFFDIO_WRITEPROTECT		(0x06)
 #define _UFFDIO_CONTINUE		(0x07)
+#define _UFFDIO_WAKE_THREAD		(0x08)
 #define _UFFDIO_API			(0x3F)
 
 /* userfaultfd ioctl ids */
@@ -83,6 +86,8 @@
 				     struct uffdio_range)
 #define UFFDIO_WAKE		_IOR(UFFDIO, _UFFDIO_WAKE,	\
 				     struct uffdio_range)
+#define UFFDIO_WAKE_THREAD		_IOR(UFFDIO, _UFFDIO_WAKE_THREAD,	\
+				     struct uffdio_thread)
 #define UFFDIO_COPY		_IOWR(UFFDIO, _UFFDIO_COPY,	\
 				      struct uffdio_copy)
 #define UFFDIO_ZEROPAGE		_IOWR(UFFDIO, _UFFDIO_ZEROPAGE,	\
@@ -227,6 +232,10 @@ struct uffdio_api {
 struct uffdio_range {
 	__u64 start;
 	__u64 len;
+};
+
+struct uffdio_thread {
+	pid_t tid;
 };
 
 struct uffdio_register {

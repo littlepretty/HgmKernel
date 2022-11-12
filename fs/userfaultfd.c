@@ -36,6 +36,13 @@ int sysctl_unprivileged_userfaultfd __read_mostly;
 
 static struct kmem_cache *userfaultfd_ctx_cachep __read_mostly;
 
+#define UFFD_MSG_QUEUE_CAPACITY 1024
+
+struct uffd_fast_msg {
+	atomic_t valid;
+	struct uffd_msg msg;
+};
+
 /*
  * Start with fault_pending_wqh and fault_wqh so they're more likely
  * to be in the same cacheline.
@@ -73,6 +80,9 @@ struct userfaultfd_ctx {
 	atomic_t mmap_changing;
 	/* mm with one ore more vmas attached to this userfaultfd_ctx */
 	struct mm_struct *mm;
+	struct uffd_fast_msg *msg_queue;
+	atomic_t msg_queue_start;
+	atomic_t msg_queue_end;
 };
 
 struct userfaultfd_fork_ctx {
@@ -371,6 +381,67 @@ static inline unsigned int userfaultfd_get_blocking_state(unsigned int flags)
 	return TASK_UNINTERRUPTIBLE;
 }
 
+static int userfaultfd_push_queue(struct userfaultfd_ctx *ctx, struct uffd_msg *msg)
+{
+	int start, end, new_end;
+retry:
+	start = atomic_read(&ctx->msg_queue_start);
+	end = atomic_read(&ctx->msg_queue_end);
+	new_end = (end + 1) % UFFD_MSG_QUEUE_CAPACITY;
+	if (start == new_end)
+		return -ENOSPC;
+	if (atomic_cmpxchg_relaxed(&ctx->msg_queue_end, end, new_end) != end)
+		goto retry;
+	// We own `end` now.
+	while (atomic_read_acquire(&ctx->msg_queue[start].valid));
+	memcpy(&ctx->msg_queue[end].msg, msg, sizeof(*msg));
+	atomic_set_release(&ctx->msg_queue[end].valid, 1);
+	return 0;
+}
+
+static int userfaultfd_pop_queue(struct userfaultfd_ctx *ctx, struct uffd_msg *msg)
+{
+	int start, end, new_start;
+retry:
+	start = atomic_read(&ctx->msg_queue_start);
+	end = atomic_read(&ctx->msg_queue_end);
+	if (start == end)
+		return -EAGAIN;
+	new_start = (start + 1) % UFFD_MSG_QUEUE_CAPACITY;
+	if (atomic_cmpxchg_relaxed(&ctx->msg_queue_start, start, new_start) != start)
+		goto retry;
+	// We own `start` now.
+	while (!atomic_read_acquire(&ctx->msg_queue[start].valid));
+	memcpy(msg, &ctx->msg_queue[start].msg, sizeof(*msg));
+	atomic_set_release(&ctx->msg_queue[end].valid, 0);
+	return 0;
+}
+
+static int handle_fast_userfault(struct userfaultfd_ctx *ctx,
+				 struct vm_fault *vmf,
+				 unsigned long reason)
+{
+	unsigned int blocking_state;
+	struct uffd_msg msg;
+	int ret = -ENOENT;
+
+	if (WARN_ON_ONCE(!ctx->msg_queue))
+		return ret;
+
+	msg = userfault_msg(vmf->address, vmf->real_address, vmf->flags, reason,
+			ctx->features);
+
+	ret = userfaultfd_push_queue(ctx, &msg);
+	if (WARN_ON_ONCE(ret))
+		return ret;
+
+	blocking_state = userfaultfd_get_blocking_state(vmf->flags);
+	set_current_state(blocking_state);
+	schedule();
+
+	return 0;
+}
+
 /*
  * The locking rules involved in returning VM_FAULT_RETRY depending on
  * FAULT_FLAG_ALLOW_RETRY, FAULT_FLAG_RETRY_NOWAIT and
@@ -495,6 +566,11 @@ vm_fault_t handle_userfault(struct vm_fault *vmf, unsigned long reason)
 
 	/* take the reference before dropping the mmap_lock */
 	userfaultfd_ctx_get(ctx);
+
+	if (!handle_fast_userfault(ctx, vmf, reason))
+		printk_ratelimited("Retrying fast fault: %lx\n", vmf->address);
+
+	goto out;
 
 	init_waitqueue_func_entry(&uwq.wq, userfaultfd_wake_function);
 	uwq.wq.private = current;
@@ -684,6 +760,9 @@ int dup_userfaultfd(struct vm_area_struct *vma, struct list_head *fcs)
 			ctx = fctx->new;
 			break;
 		}
+
+	if (octx->msg_queue)
+		return -ENOMEM;
 
 	if (!ctx) {
 		fctx = kmalloc(sizeof(*fctx), GFP_KERNEL);
@@ -1190,6 +1269,39 @@ static ssize_t userfaultfd_ctx_read(struct userfaultfd_ctx *ctx, int no_wait,
 	}
 
 	return ret;
+}
+
+static ssize_t userfaultfd_read_fast(struct file *file, char __user *buf,
+				     size_t count, loff_t *ppos)
+{
+	struct userfaultfd_ctx *ctx = file->private_data;
+	ssize_t _ret, ret = 0;
+	struct uffd_msg msg;
+	int no_wait = file->f_flags & O_NONBLOCK;
+
+	if (!userfaultfd_is_initialized(ctx))
+		return -EINVAL;
+
+	if (!no_wait)
+		return -EINVAL;
+
+	for (;;) {
+		if (count < sizeof(msg))
+			return ret ? ret : -EINVAL;
+		_ret = userfaultfd_pop_queue(ctx, &msg);
+		if (_ret < 0)
+			return ret ? ret : _ret;
+		if (copy_to_user((__u64 __user *) buf, &msg, sizeof(msg)))
+			return ret ? ret : -EFAULT;
+		ret += sizeof(msg);
+		buf += sizeof(msg);
+		count -= sizeof(msg);
+		/*
+		 * Allow to read more than one fault at time but only
+		 * block if waiting for the very first one.
+		 */
+		no_wait = O_NONBLOCK;
+	}
 }
 
 static ssize_t userfaultfd_read(struct file *file, char __user *buf,
@@ -1728,6 +1840,31 @@ out:
 	return ret;
 }
 
+static int userfaultfd_wake_thread(struct userfaultfd_ctx *ctx,
+				   unsigned long arg)
+{
+	int ret;
+	struct uffdio_thread uffdio_wake;
+	const void __user *buf = (void __user *)arg;
+	struct task_struct *task;
+
+	ret = -EFAULT;
+	if (copy_from_user(&uffdio_wake, buf, sizeof(uffdio_wake)))
+		goto out;
+
+	ret = -ENOENT;
+	task = find_task_by_vpid(uffdio_wake.tid);
+	if (!task)
+		goto out;
+
+	smp_store_mb(task->__state, TASK_RUNNING);
+
+	ret = 0;
+
+out:
+	return ret;
+}
+
 static int userfaultfd_copy(struct userfaultfd_ctx *ctx,
 			    unsigned long arg)
 {
@@ -2052,6 +2189,9 @@ static long userfaultfd_ioctl(struct file *file, unsigned cmd,
 	case UFFDIO_WAKE:
 		ret = userfaultfd_wake(ctx, arg);
 		break;
+	case UFFDIO_WAKE_THREAD:
+		ret = userfaultfd_wake_thread(ctx, arg);
+		break;
 	case UFFDIO_COPY:
 		ret = userfaultfd_copy(ctx, arg);
 		break;
@@ -2102,7 +2242,7 @@ static const struct file_operations userfaultfd_fops = {
 #endif
 	.release	= userfaultfd_release,
 	.poll		= userfaultfd_poll,
-	.read		= userfaultfd_read,
+	.read		= userfaultfd_read_fast,
 	.unlocked_ioctl = userfaultfd_ioctl,
 	.compat_ioctl	= compat_ptr_ioctl,
 	.llseek		= noop_llseek,
@@ -2122,6 +2262,7 @@ static void init_once_userfaultfd_ctx(void *mem)
 static int new_userfaultfd(int flags)
 {
 	struct userfaultfd_ctx *ctx;
+	struct uffd_fast_msg *msg_queue;
 	int fd;
 
 	BUG_ON(!current->mm);
@@ -2134,9 +2275,16 @@ static int new_userfaultfd(int flags)
 	if (flags & ~(UFFD_SHARED_FCNTL_FLAGS | UFFD_USER_MODE_ONLY))
 		return -EINVAL;
 
-	ctx = kmem_cache_alloc(userfaultfd_ctx_cachep, GFP_KERNEL);
-	if (!ctx)
+	msg_queue = kmalloc(sizeof(*msg_queue) * UFFD_MSG_QUEUE_CAPACITY, GFP_KERNEL);
+	if (!msg_queue)
 		return -ENOMEM;
+	memset(msg_queue, 0, sizeof(*msg_queue) * UFFD_MSG_QUEUE_CAPACITY);
+
+	ctx = kmem_cache_alloc(userfaultfd_ctx_cachep, GFP_KERNEL);
+	if (!ctx) {
+		kfree(msg_queue);
+		return -ENOMEM;
+	}
 
 	refcount_set(&ctx->refcount, 1);
 	ctx->flags = flags;
@@ -2144,6 +2292,9 @@ static int new_userfaultfd(int flags)
 	ctx->released = false;
 	atomic_set(&ctx->mmap_changing, 0);
 	ctx->mm = current->mm;
+	ctx->msg_queue = msg_queue;
+	atomic_set(&ctx->msg_queue_start, 0);
+	atomic_set(&ctx->msg_queue_end, 0);
 	/* prevent the mm struct to be freed */
 	mmgrab(ctx->mm);
 
