@@ -6877,7 +6877,7 @@ void adjust_range_if_pmd_sharing_possible(struct vm_area_struct *vma,
 
 void hugetlb_vma_lock_read(struct vm_area_struct *vma)
 {
-	if (__vma_shareable_flags_pmd(vma)) {
+	if (__vma_has_hugetlb_vma_lock(vma)) {
 		struct hugetlb_vma_lock *vma_lock = vma->vm_private_data;
 
 		down_read(&vma_lock->rw_sema);
@@ -6886,7 +6886,7 @@ void hugetlb_vma_lock_read(struct vm_area_struct *vma)
 
 void hugetlb_vma_unlock_read(struct vm_area_struct *vma)
 {
-	if (__vma_shareable_flags_pmd(vma)) {
+	if (__vma_has_hugetlb_vma_lock(vma)) {
 		struct hugetlb_vma_lock *vma_lock = vma->vm_private_data;
 
 		up_read(&vma_lock->rw_sema);
@@ -6895,7 +6895,7 @@ void hugetlb_vma_unlock_read(struct vm_area_struct *vma)
 
 void hugetlb_vma_lock_write(struct vm_area_struct *vma)
 {
-	if (__vma_shareable_flags_pmd(vma)) {
+	if (__vma_has_hugetlb_vma_lock(vma)) {
 		struct hugetlb_vma_lock *vma_lock = vma->vm_private_data;
 
 		down_write(&vma_lock->rw_sema);
@@ -6904,7 +6904,7 @@ void hugetlb_vma_lock_write(struct vm_area_struct *vma)
 
 void hugetlb_vma_unlock_write(struct vm_area_struct *vma)
 {
-	if (__vma_shareable_flags_pmd(vma)) {
+	if (__vma_has_hugetlb_vma_lock(vma)) {
 		struct hugetlb_vma_lock *vma_lock = vma->vm_private_data;
 
 		up_write(&vma_lock->rw_sema);
@@ -6915,7 +6915,7 @@ int hugetlb_vma_trylock_write(struct vm_area_struct *vma)
 {
 	struct hugetlb_vma_lock *vma_lock = vma->vm_private_data;
 
-	if (!__vma_shareable_flags_pmd(vma))
+	if (!__vma_has_hugetlb_vma_lock(vma))
 		return 1;
 
 	return down_write_trylock(&vma_lock->rw_sema);
@@ -6923,7 +6923,7 @@ int hugetlb_vma_trylock_write(struct vm_area_struct *vma)
 
 void hugetlb_vma_assert_locked(struct vm_area_struct *vma)
 {
-	if (__vma_shareable_flags_pmd(vma)) {
+	if (__vma_has_hugetlb_vma_lock(vma)) {
 		struct hugetlb_vma_lock *vma_lock = vma->vm_private_data;
 
 		lockdep_assert_held(&vma_lock->rw_sema);
@@ -6955,7 +6955,7 @@ static void __hugetlb_vma_unlock_write_put(struct hugetlb_vma_lock *vma_lock)
 
 static void __hugetlb_vma_unlock_write_free(struct vm_area_struct *vma)
 {
-	if (__vma_shareable_flags_pmd(vma)) {
+	if (__vma_has_hugetlb_vma_lock(vma)) {
 		struct hugetlb_vma_lock *vma_lock = vma->vm_private_data;
 
 		__hugetlb_vma_unlock_write_put(vma_lock);
@@ -6967,7 +6967,7 @@ static void hugetlb_vma_lock_free(struct vm_area_struct *vma)
 	/*
 	 * Only present in sharable vmas.
 	 */
-	if (!vma || !__vma_shareable_flags_pmd(vma))
+	if (!vma || !__vma_has_hugetlb_vma_lock(vma))
 		return;
 
 	if (vma->vm_private_data) {
