@@ -1235,7 +1235,8 @@ bool want_pmd_share(struct vm_area_struct *vma, unsigned long addr);
 #define flush_hugetlb_tlb_range(vma, addr, end)	flush_tlb_range(vma, addr, end)
 #endif
 
-static inline bool __vma_shareable_lock(struct vm_area_struct *vma)
+static inline bool
+__vma_has_hugetlb_vma_lock(struct vm_area_struct *vma)
 {
 	return (vma->vm_flags & VM_MAYSHARE) && vma->vm_private_data;
 }
@@ -1252,13 +1253,17 @@ hugetlb_walk(struct vm_area_struct *vma, unsigned long addr, unsigned long sz)
 	struct hugetlb_vma_lock *vma_lock = vma->vm_private_data;
 
 	/*
-	 * If pmd sharing possible, locking needed to safely walk the
-	 * hugetlb pgtables.  More information can be found at the comment
-	 * above huge_pte_offset() in the same file.
+	 * If the VMA has the hugetlb vma lock (PMD sharable or HGM
+	 * collapsable), locking needed to safely walk the hugetlb pgtables.
+	 * More information can be found at the comment above huge_pte_offset()
+	 * in the same file.
+	 *
+	 * This doesn't do a full high-granularity walk, so we are concerned
+	 * only with PMD unsharing.
 	 *
 	 * NOTE: lockdep_is_held() is only defined with CONFIG_LOCKDEP.
 	 */
-	if (__vma_shareable_lock(vma))
+	if (__vma_has_hugetlb_vma_lock(vma))
 		WARN_ON_ONCE(!lockdep_is_held(&vma_lock->rw_sema) &&
 			     !lockdep_is_held(
 				 &vma->vm_file->f_mapping->i_mmap_rwsem));
