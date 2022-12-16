@@ -383,6 +383,13 @@ extern unsigned int kobjsize(const void *objp);
 # define VM_UFFD_MINOR		VM_NONE
 #endif /* CONFIG_HAVE_ARCH_USERFAULTFD_MINOR */
 
+#ifdef CONFIG_HUGETLB_HIGH_GRANULARITY_MAPPING
+# define VM_HUGETLB_HGM_BIT	38
+# define VM_HUGETLB_HGM		BIT(VM_HUGETLB_HGM_BIT)	/* HugeTLB high-granularity mapping */
+#else /* !CONFIG_HUGETLB_HIGH_GRANULARITY_MAPPING */
+# define VM_HUGETLB_HGM		VM_NONE
+#endif /* CONFIG_HUGETLB_HIGH_GRANULARITY_MAPPING */
+
 /* Bits set in the VMA until the stack is in its final location */
 #define VM_STACK_INCOMPLETE_SETUP	(VM_RAND_READ | VM_SEQ_READ)
 
