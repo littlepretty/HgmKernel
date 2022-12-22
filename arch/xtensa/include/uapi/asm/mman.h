@@ -113,6 +113,8 @@
 
 #define MADV_COLLAPSE	25		/* Synchronous hugepage collapse */
 
+#define MADV_SPLIT	26		/* Enable hugepage high-granularity APIs */
+
 /* compatibility flags */
 #define MAP_FILE	0
 
