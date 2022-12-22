@@ -1011,6 +1011,28 @@ static long madvise_remove(struct vm_area_struct *vma,
 	return error;
 }
 
+static int madvise_split(struct vm_area_struct *vma,
+			 unsigned long *new_flags)
+{
+#ifdef CONFIG_HUGETLB_HIGH_GRANULARITY_MAPPING
+	if (!is_vm_hugetlb_page(vma) || !hugetlb_hgm_eligible(vma))
+		return -EINVAL;
+	/*
+	 * Attempt to allocate the VMA lock again. If it isn't allocated,
+	 * MADV_COLLAPSE won't work.
+	 */
+	hugetlb_vma_lock_alloc(vma);
+
+	/* PMD sharing doesn't work with HGM. */
+	hugetlb_unshare_all_pmds(vma);
+
+	*new_flags |= VM_HUGETLB_HGM;
+	return 0;
+#else
+	return -EINVAL;
+#endif
+}
+
 /*
  * Apply an madvise behavior to a region of a vma.  madvise_update_vma
  * will handle splitting a vm area into separate areas, each area with its own
@@ -1089,6 +1111,11 @@ static int madvise_vma_behavior(struct vm_area_struct *vma,
 		break;
 	case MADV_COLLAPSE:
 		return madvise_collapse(vma, prev, start, end);
+	case MADV_SPLIT:
+		error = madvise_split(vma, &new_flags);
+		if (error)
+			goto out;
+		break;
 	}
 
 	anon_name = anon_vma_name(vma);
@@ -1183,6 +1210,9 @@ madvise_behavior_valid(int behavior)
 	case MADV_HUGEPAGE:
 	case MADV_NOHUGEPAGE:
 	case MADV_COLLAPSE:
+#endif
+#ifdef CONFIG_HUGETLB_HIGH_GRANULARITY_MAPPING
+	case MADV_SPLIT:
 #endif
 	case MADV_DONTDUMP:
 	case MADV_DODUMP:
