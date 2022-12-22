@@ -1006,6 +1006,28 @@ static long madvise_remove(struct vm_area_struct *vma,
 	return error;
 }
 
+static int madvise_split(struct vm_area_struct *vma,
+			 unsigned long *new_flags)
+{
+#ifdef CONFIG_HUGETLB_HIGH_GRANULARITY_MAPPING
+	if (!is_vm_hugetlb_page(vma) || !hugetlb_hgm_eligible(vma))
+		return -EINVAL;
+
+	/*
+	 * PMD sharing doesn't work with HGM. If this MADV_SPLIT is on part
+	 * of a VMA, then we will split the VMA. Here, we're unsharing before
+	 * splitting because it's simpler, although we may be unsharing more
+	 * than we need.
+	 */
+	hugetlb_unshare_all_pmds(vma);
+
+	*new_flags |= VM_HUGETLB_HGM;
+	return 0;
+#else
+	return -EINVAL;
+#endif
+}
+
 /*
  * Apply an madvise behavior to a region of a vma.  madvise_update_vma
  * will handle splitting a vm area into separate areas, each area with its own
@@ -1084,6 +1106,11 @@ static int madvise_vma_behavior(struct vm_area_struct *vma,
 		break;
 	case MADV_COLLAPSE:
 		return madvise_collapse(vma, prev, start, end);
+	case MADV_SPLIT:
+		error = madvise_split(vma, &new_flags);
+		if (error)
+			goto out;
+		break;
 	}
 
 	anon_name = anon_vma_name(vma);
@@ -1178,6 +1205,9 @@ madvise_behavior_valid(int behavior)
 	case MADV_HUGEPAGE:
 	case MADV_NOHUGEPAGE:
 	case MADV_COLLAPSE:
+#endif
+#ifdef CONFIG_HUGETLB_HIGH_GRANULARITY_MAPPING
+	case MADV_SPLIT:
 #endif
 	case MADV_DONTDUMP:
 	case MADV_DODUMP:
@@ -1368,6 +1398,8 @@ int madvise_set_anon_name(struct mm_struct *mm, unsigned long start,
  *		transparent huge pages so the existing pages will not be
  *		coalesced into THP and new pages will not be allocated as THP.
  *  MADV_COLLAPSE - synchronously coalesce pages into new THP.
+ *  MADV_SPLIT - allow HugeTLB pages to be mapped at PAGE_SIZE. This allows
+ *		UFFDIO_CONTINUE to accept PAGE_SIZE-aligned regions.
  *  MADV_DONTDUMP - the application wants to prevent pages in the given range
  *		from being included in its core dump.
  *  MADV_DODUMP - cancel MADV_DONTDUMP: no longer exclude from core dump.
