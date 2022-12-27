@@ -6068,13 +6068,6 @@ static inline vm_fault_t hugetlb_handle_userfault(struct vm_area_struct *vma,
 						  unsigned long addr,
 						  unsigned long reason)
 {
-	/*
-	 * Don't use the hpage-aligned address if the user has explicitly
-	 * enabled HGM.
-	 */
-	if (hugetlb_hgm_advised(vma) && reason == VM_UFFD_MINOR)
-		haddr = address & PAGE_MASK;
-
 	u32 hash;
 	struct vm_fault vmf = {
 		.vma = vma,
@@ -6250,15 +6243,24 @@ static vm_fault_t hugetlb_no_page(struct mm_struct *mm,
 
 		/* Check for page in userfault range. */
 		if (userfaultfd_minor(vma)) {
+			/*
+			 * Don't use the hpage-aligned address if the user has
+			 * explicitly enabled HGM.
+			 */
+			unsigned long masked_address = hugetlb_hgm_advised(vma)
+				? address & PAGE_MASK
+				: haddr;
+
 			folio_unlock(folio);
 			folio_put(folio);
+
 			/* See comment in userfaultfd_missing() block above */
 			if (!hugetlb_pte_stable(h, hpte, old_pte)) {
 				ret = 0;
 				goto out;
 			}
 			return hugetlb_handle_userfault(vma, mapping, idx, flags,
-							haddr, address,
+							masked_address, address,
 							VM_UFFD_MINOR);
 		}
 	}
