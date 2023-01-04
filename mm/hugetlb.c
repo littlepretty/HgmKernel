@@ -6649,7 +6649,14 @@ unsigned long hugetlb_change_protection(struct vm_area_struct *vma,
 	last_addr_mask = hugetlb_mask_last_page(h);
 	for (; address < end; address += psize) {
 		spinlock_t *ptl;
-		ptep = hugetlb_walk(vma, address, psize);
+		if (!uffd_wp)
+			ptep = hugetlb_walk(vma, address, psize);
+		else
+			/*
+			 * With uffd_wp, we need to install PTE markers, so
+			 * we can't just skip PTEs that haven't been allocated.
+			 */
+			ptep = huge_pte_alloc(mm, vma, address, psize);
 		if (!ptep) {
 			address |= last_addr_mask;
 			continue;
