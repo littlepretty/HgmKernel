@@ -745,9 +745,7 @@ static int smaps_hugetlb_range(pte_t *pte, unsigned long hmask,
 			page = pfn_swap_entry_to_page(swpent);
 	}
 	if (page) {
-		int mapcount = page_mapcount(page);
-
-		if (mapcount >= 2)
+		if (vma->vm_flags & VM_SHARED)
 			mss->shared_hugetlb += huge_page_size(hstate_vma(vma));
 		else
 			mss->private_hugetlb += huge_page_size(hstate_vma(vma));
