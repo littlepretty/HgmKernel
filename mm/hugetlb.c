@@ -5397,7 +5397,10 @@ again:
 		} else {
 			ptepage = pte_page(entry);
 			hpage = compound_head(ptepage);
-			get_page(hpage);
+			if (try_get_page(hpage)) {
+				ret = -EFAULT;
+				break;
+			}
 
 			/*
 			 * Failing to duplicate the anon rmap is a rare case
@@ -6132,6 +6135,30 @@ static bool hugetlb_pte_stable(struct hstate *h, struct hugetlb_pte *hpte,
 	return same;
 }
 
+/*
+ * Like filemap_lock_folio, but check the refcount of the page afterwards to
+ * check if we are at risk of overflowing refcount back to 0.
+ *
+ * This should be used in places that can be used to easily overflow refcount,
+ * like places that create high-granularity mappings.
+ */
+static struct folio *hugetlb_try_find_lock_folio(struct address_space *mapping,
+						pgoff_t idx)
+{
+	struct folio *folio = filemap_lock_folio(mapping, idx);
+
+	/*
+	 * This check is very similar to the one in try_get_page().
+	 *
+	 * This check is inherently racy, so WARN_ON_ONCE() if this condition
+	 * ever occurs.
+	 */
+	if (WARN_ON_ONCE(folio && folio_ref_count(folio) <= 0))
+		return ERR_PTR(-EFAULT);
+
+	return folio;
+}
+
 static vm_fault_t hugetlb_no_page(struct mm_struct *mm,
 			struct vm_area_struct *vma,
 			struct address_space *mapping, pgoff_t idx,
@@ -6168,7 +6195,15 @@ static vm_fault_t hugetlb_no_page(struct mm_struct *mm,
 	 * before we get page_table_lock.
 	 */
 	new_folio = false;
-	folio = filemap_lock_folio(mapping, idx);
+	folio = hugetlb_try_find_lock_folio(mapping, idx);
+	if (IS_ERR(folio)) {
+		/*
+		 * We don't want to invoke the OOM killer here, as we aren't
+		 * actually OOMing.
+		 */
+		ret = VM_FAULT_SIGBUS;
+		goto out;
+	}
 	if (!folio) {
 		size = i_size_read(mapping->host) >> huge_page_shift(h);
 		if (idx >= size)
@@ -6600,8 +6635,8 @@ int hugetlb_mcopy_atomic_pte(struct mm_struct *dst_mm,
 
 	if (is_continue) {
 		ret = -EFAULT;
-		folio = filemap_lock_folio(mapping, idx);
-		if (!folio)
+		folio = hugetlb_try_find_lock_folio(mapping, idx);
+		if (IS_ERR_OR_NULL(folio))
 			goto out;
 		folio_in_pagecache = true;
 	} else if (!*pagep) {
