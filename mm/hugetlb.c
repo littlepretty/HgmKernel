@@ -5397,7 +5397,10 @@ again:
 		} else {
 			ptepage = pte_page(entry);
 			hpage = compound_head(ptepage);
-			get_page(hpage);
+			if (try_get_page(hpage)) {
+				ret = -ENOMEM;
+				break;
+			}
 
 			/*
 			 * Failing to duplicate the anon rmap is a rare case
@@ -6118,6 +6121,29 @@ static bool hugetlb_pte_stable(struct hstate *h, struct hugetlb_pte *hpte,
 	return same;
 }
 
+/*
+ * Like filemap_lock_folio, but check the refcount of the page afterwards to
+ * check if we are at risk of overflowing refcount back to 0.
+ *
+ * This should be used in places that can be used to easily overflow refcount,
+ * like places that create high-granularity mappings.
+ */
+static struct folio *hugetlb_try_find_lock_folio(struct address_space *mapping,
+						pgoff_t idx,
+						bool *failed)
+{
+	struct folio *folio = filemap_lock_folio(mapping, idx);
+
+	/*
+	 * This check is very similar to the one in try_get_page().
+	 *
+	 * This check is inherently racy, so WARN_ON_ONCE() if this condition
+	 * ever occurs.
+	 */
+	*failed = WARN_ON_ONCE(folio && folio_ref_count(folio) <= 0);
+	return folio;
+}
+
 static vm_fault_t hugetlb_no_page(struct mm_struct *mm,
 			struct vm_area_struct *vma,
 			struct address_space *mapping, pgoff_t idx,
@@ -6135,6 +6161,7 @@ static vm_fault_t hugetlb_no_page(struct mm_struct *mm,
 	unsigned long haddr = address & huge_page_mask(h);
 	bool new_folio, new_pagecache_folio = false;
 	unsigned long haddr_hgm = address & hugetlb_pte_mask(hpte);
+	bool refcount_overflow = false;
 	u32 hash = hugetlb_fault_mutex_hash(mapping, idx);
 
 	/*
@@ -6154,7 +6181,15 @@ static vm_fault_t hugetlb_no_page(struct mm_struct *mm,
 	 * before we get page_table_lock.
 	 */
 	new_folio = false;
-	folio = filemap_lock_folio(mapping, idx);
+	folio = hugetlb_try_find_lock_folio(mapping, idx, &refcount_overflow);
+	if (refcount_overflow) {
+		/*
+		 * We don't want to invoke the OOM killer here, as we aren't
+		 * actually OOMing.
+		 */
+		ret = VM_FAULT_SIGBUS;
+		goto out;
+	}
 	if (!folio) {
 		size = i_size_read(mapping->host) >> huge_page_shift(h);
 		if (idx >= size)
@@ -6582,11 +6617,14 @@ int hugetlb_mcopy_atomic_pte(struct mm_struct *dst_mm,
 	struct folio *folio;
 	struct page *subpage;
 	int writable;
-	bool folio_in_pagecache = false;
+	bool folio_in_pagecache = false, refcount_overflow = false;
 
 	if (is_continue) {
+		folio = hugetlb_try_find_lock_folio(mapping, idx,
+						    &refcount_overflow);
+		if (refcount_overflow)
+			goto out;
 		ret = -EFAULT;
-		folio = filemap_lock_folio(mapping, idx);
 		if (!folio)
 			goto out;
 		folio_in_pagecache = true;
