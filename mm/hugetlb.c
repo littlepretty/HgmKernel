@@ -5995,6 +5995,34 @@ static bool hugetlb_pte_stable(struct hstate *h, struct hugetlb_pte *hpte,
 	return same;
 }
 
+/*
+ * Like find_lock_page, but check the refcount of the page afterwards to check
+ * if we are at risk overflowing refcount. If we are, set failed to true.
+ *
+ * This should be used in places that can be used to easily overflow refcount,
+ * like places that create high-granularity mappings.
+ *
+ * By preventing refcount from overflowing, we also prevent mapcount from
+ * overflowing, as mapcount will always be at least as large as refcount.
+ */
+static struct page *hugetlb_try_find_lock_page(struct address_space *mapping,
+					       pgoff_t idx,
+					       bool *failed)
+{
+	struct page *p = find_lock_page(mapping, idx);
+
+	/*
+	 * This check is very similar to the one in try_get_page(), except that
+	 * we are more aggressive. Bad things can happen if refcount or
+	 * mapcount go negative, so check that it isn't halfway to overflowing.
+	 *
+	 * This check is inherently racy, so WARN_ON_ONCE() if this condition
+	 * ever occurs.
+	 */
+	*failed = WARN_ON_ONCE(p && page_count(p) > INT_MAX/2);
+	return p;
+}
+
 static vm_fault_t hugetlb_no_page(struct mm_struct *mm,
 			struct vm_area_struct *vma,
 			struct address_space *mapping, pgoff_t idx,
@@ -6011,6 +6039,7 @@ static vm_fault_t hugetlb_no_page(struct mm_struct *mm,
 	unsigned long haddr = address & huge_page_mask(h);
 	unsigned long haddr_hgm = address & hugetlb_pte_mask(hpte);
 	bool new_page, new_pagecache_page = false;
+	bool refcount_overflow = false;
 	u32 hash = hugetlb_fault_mutex_hash(mapping, idx);
 
 	/*
@@ -6030,7 +6059,11 @@ static vm_fault_t hugetlb_no_page(struct mm_struct *mm,
 	 * before we get page_table_lock.
 	 */
 	new_page = false;
-	page = find_lock_page(mapping, idx);
+	page = hugetlb_try_find_lock_page(mapping, idx, &refcount_overflow);
+	if (refcount_overflow) {
+		ret = VM_FAULT_OOM;
+		goto out;
+	}
 	if (!page) {
 		size = i_size_read(mapping->host) >> huge_page_shift(h);
 		if (idx >= size)
@@ -6463,11 +6496,14 @@ int hugetlb_mcopy_atomic_pte(struct mm_struct *dst_mm,
 	int ret = -ENOMEM;
 	struct page *page, *subpage;
 	int writable;
-	bool page_in_pagecache = false;
+	bool page_in_pagecache = false, refcount_overflow = false;
 
 	if (is_continue) {
+		page = hugetlb_try_find_lock_page(mapping, idx,
+						  &refcount_overflow);
+		if (refcount_overflow)
+			goto out;
 		ret = -EFAULT;
-		page = find_lock_page(mapping, idx);
 		if (!page)
 			goto out;
 		page_in_pagecache = true;
