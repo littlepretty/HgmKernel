@@ -1377,8 +1377,7 @@ void page_remove_rmap(struct page *page,
 	VM_BUG_ON_PAGE(compound && !PageHead(page), page);
 
 	/* Hugetlb pages are not counted in NR_*MAPPED */
-	if (unlikely(PageHuge(page))) {
-		/* hugetlb pages are always mapped with pmds */
+	if (unlikely(PageHuge(page)) && compound) {
 		atomic_dec(compound_mapcount_ptr(page));
 		return;
 	}
