@@ -72,9 +72,9 @@ unsigned long hugetlb_pte_mask(const struct hugetlb_pte *hpte)
 bool hugetlb_pte_present_leaf(const struct hugetlb_pte *hpte, pte_t pte);
 
 pmd_t *hugetlb_alloc_pmd(struct mm_struct *mm, struct hugetlb_pte *hpte,
-		unsigned long addr);
+		unsigned long addr, bool *allocated);
 pte_t *hugetlb_alloc_pte(struct mm_struct *mm, struct hugetlb_pte *hpte,
-		unsigned long addr);
+		unsigned long addr, bool *allocated);
 
 struct hugepage_subpool {
 	spinlock_t lock;
@@ -243,7 +243,7 @@ void hugetlb_full_walk_continue(struct hugetlb_pte *hpte,
 				struct vm_area_struct *vma, unsigned long addr);
 int hugetlb_full_walk_alloc(struct hugetlb_pte *hpte,
 			    struct vm_area_struct *vma, unsigned long addr,
-			    unsigned long target_sz);
+			    unsigned long target_sz, bool *inc);
 
 struct address_space *hugetlb_page_mapping_lock_write(struct page *hpage);
 
@@ -295,7 +295,7 @@ pte_t *huge_pte_offset(struct mm_struct *mm,
 		       unsigned long addr, unsigned long sz);
 unsigned long hugetlb_mask_last_page(struct hstate *h);
 int hugetlb_walk_step(struct mm_struct *mm, struct hugetlb_pte *hpte,
-		      unsigned long addr, unsigned long sz);
+		      unsigned long addr, unsigned long sz, bool *allocated);
 int huge_pmd_unshare(struct mm_struct *mm, struct vm_area_struct *vma,
 				unsigned long addr, pte_t *ptep);
 void adjust_range_if_pmd_sharing_possible(struct vm_area_struct *vma,
@@ -1268,7 +1268,7 @@ bool hugetlb_hgm_advised(struct vm_area_struct *vma);
 bool hugetlb_hgm_eligible(struct vm_area_struct *vma);
 int hugetlb_alloc_largest_pte(struct hugetlb_pte *hpte, struct mm_struct *mm,
 			      struct vm_area_struct *vma, unsigned long start,
-			      unsigned long end);
+			      unsigned long end, bool *inc);
 int hugetlb_collapse(struct mm_struct *mm, struct vm_area_struct *vma,
 		     unsigned long start, unsigned long end);
 #else
