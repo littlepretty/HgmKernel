@@ -8203,6 +8203,255 @@ int hugetlb_collapse(struct mm_struct *mm, unsigned long start,
 	return ret;
 }
 
+/*
+ * Find the optimal HugeTLB PTE shift that @desired_addr could be mapped at.
+ */
+static int hugetlb_find_shift(struct vm_area_struct *vma,
+			      unsigned long curr,
+			      unsigned long end,
+			      unsigned long desired_addr,
+			      unsigned long desired_shift,
+			      unsigned int *shift_found)
+{
+	struct hstate *h = hstate_vma(vma);
+	struct hstate *tmp_h;
+	unsigned int shift;
+	unsigned long sz;
+
+	for_each_hgm_shift(h, tmp_h, shift) {
+		sz = 1UL << shift;
+		/* This sz is not aligned or too large. */
+		if (!IS_ALIGNED(curr, sz) || curr + sz > end)
+			continue;
+		/*
+		 * When desired_addr is in [curr, curr + sz),
+		 * we want shift to be as close to desired_shift
+		 * as possible.
+		 */
+		if (curr <= desired_addr && desired_addr < curr + sz
+		    && shift > desired_shift)
+			continue;
+
+		*shift_found = shift;
+		return 0;
+	}
+
+	return -EINVAL;
+}
+
+/*
+ * Given a particular address @addr and it is a present leaf HugeTLB PTE,
+ * split it so that the PTE that maps @addr is at @desired_shift.
+ */
+static int hugetlb_split_to_shift_present_leaf(struct mm_struct *mm,
+					       struct vm_area_struct *vma,
+					       pte_t old_entry,
+					       unsigned long start,
+					       unsigned long end,
+					       unsigned long addr,
+					       unsigned int orig_shift,
+					       unsigned int desired_shift)
+{
+	bool old_entry_dirty;
+	bool old_entry_write;
+	bool old_entry_uffd_wp;
+	pte_t new_entry;
+	unsigned long curr;
+	unsigned long sz;
+	unsigned int shift;
+	int ret = 0;
+	struct hugetlb_pte new_hpte;
+	struct page *subpage = NULL;
+	struct folio *folio = page_folio(compound_head(pte_page(old_entry)));
+	struct hstate *h = hstate_vma(vma);
+	spinlock_t *ptl;
+
+	/* Unmap original unsplit hugepage per huge_ptep_get_and_clear. */
+	hugetlb_remove_rmap(folio_page(folio, 0), orig_shift, h, vma);
+
+	old_entry_dirty = huge_pte_dirty(old_entry);
+	old_entry_write = huge_pte_write(old_entry);
+	old_entry_uffd_wp = huge_pte_uffd_wp(old_entry);
+
+	for (curr = start; curr < end; curr += sz) {
+		ret = hugetlb_find_shift(vma, curr, end, addr,
+					 desired_shift, &shift);
+
+		/* Unable to find a shift that works */
+		if (WARN_ON(ret))
+			goto abort;
+
+		/*
+		 * Do HGM full walk and allocate new page table structures
+		 * to continue to walk to the level we want.
+		 */
+		sz = 1UL << shift;
+		ret = hugetlb_full_walk_alloc(&new_hpte, vma, curr, sz);
+		if (WARN_ON(ret))
+			goto abort;
+
+		BUG_ON(hugetlb_pte_size(&new_hpte) > sz);
+		/*
+		 * When hugetlb_pte_size(new_hpte) is than sz, increment
+		 * curr by hugetlb_pte_size(new_hpte) to avoid skip over
+		 * some PTEs.
+		 */
+		if (hugetlb_pte_size(&new_hpte) < sz)
+			sz = hugetlb_pte_size(&new_hpte);
+
+		subpage = hugetlb_find_subpage(h, folio, curr);
+		/*
+		 * Creating a new (finer granularity) PT entry and
+		 * populate it with old_entry's bits.
+		 */
+		new_entry = make_huge_pte(vma, subpage,
+					  huge_pte_write(old_entry), shift);
+		if (old_entry_dirty)
+			new_entry = huge_pte_mkdirty(new_entry);
+		if (old_entry_write)
+			new_entry = huge_pte_mkwrite(new_entry);
+		if (old_entry_uffd_wp)
+			new_entry = huge_pte_mkuffd_wp(new_entry);
+		ptl = hugetlb_pte_lock(&new_hpte);
+		set_huge_pte_at(mm, curr, new_hpte.ptep, new_entry);
+		spin_unlock(ptl);
+		/* Increment ref/mapcount per set_huge_pte_at(). */
+		hugetlb_add_file_rmap(subpage, shift, h, vma);
+		folio_get(folio);
+	}
+	/*
+	 * This refcount decrement is for the huge_ptep_get_and_clear
+	 * on the hpte BEFORE splitting, for the same reason as
+	 * hugetlb_remove_rmap(), but we cannot do it at that time.
+	 * Now that splitting succeeded, the refcount can be decremented.
+	 */
+	folio_put(folio);
+	return 0;
+abort:
+	/*
+	 * Restore mapcount on unsplitted hugepage. No need to restore
+	 * refcount as we won't folio_put() until splitting succeeded.
+	 */
+	hugetlb_add_file_rmap(folio_page(folio, 0), orig_shift, h, vma);
+	return ret;
+}
+
+/*
+ * Given a particular address @addr, split the HugeTLB PTE that currently
+ * maps it so that, for the given @addr, the PTE that maps it is @desired_shift.
+ * The splitting is always done optimally.
+ *
+ * Example: given a HugeTLB 1G page mapped from VA 0 to 1G, if caller calls
+ * this API with addr=0 and desired_shift=PAGE_SHIFT, we will change the page
+ * table as follows:
+ * 1. The original PUD will be split into 512 2M PMDs first
+ * 2. The 1st PMD will further be split into 512 4K PTEs
+ *
+ * Callers are required to hold locks on the file mapping within vma.
+ */
+int hugetlb_split_to_shift(struct mm_struct *mm, struct vm_area_struct *vma,
+			   struct hugetlb_pte *hpte, unsigned long addr,
+			   unsigned int desired_shift)
+{
+	unsigned long start, end;
+	unsigned long desired_sz = 1UL << desired_shift;
+	int ret;
+	pte_t old_entry;
+	struct mmu_gather tlb;
+	struct mmu_notifier_range range;
+	spinlock_t *ptl;
+
+	BUG_ON(!hpte->ptep);
+
+	start = addr & hugetlb_pte_mask(hpte);
+	end = start + hugetlb_pte_size(hpte);
+	BUG_ON(!IS_ALIGNED(start, desired_sz));
+	BUG_ON(!IS_ALIGNED(end, desired_sz));
+	BUG_ON(addr < start || end <= addr);
+
+	if (hpte->shift == desired_shift)
+		return 0;
+
+	/*
+	 * Non none-mostly hugetlb PTEs must be present leaf-level PTE,
+	 * i.e. not split before.
+	 */
+	ptl = hugetlb_pte_lock(hpte);
+	BUG_ON(!huge_pte_none_mostly(huge_ptep_get(hpte->ptep)) &&
+	       !hugetlb_pte_present_leaf(hpte, huge_ptep_get(hpte->ptep)));
+
+	i_mmap_assert_write_locked(vma->vm_file->f_mapping);
+
+	mmu_notifier_range_init(&range, MMU_NOTIFY_CLEAR, 0, mm, start, end);
+	mmu_notifier_invalidate_range_start(&range);
+
+	/*
+	 * Get and clear the PTE. We will allocate new page table structures
+	 * when walking the page table.
+	 */
+	old_entry = huge_ptep_get_and_clear(mm, start, hpte->ptep);
+	spin_unlock(ptl);
+
+	/*
+	 * From now on, any failure exit needs to go through "skip" to
+	 * put old_entry back. If any form of hugetlb_split_to_shift_xxx
+	 * is invoked, it also needs to go through "abort" to get rid of
+	 * the allocated PTEs created before splitting fails.
+	 */
+
+	if (unlikely(huge_pte_none_mostly(old_entry))) {
+		ret = -EAGAIN;
+		goto skip;
+	}
+	if (unlikely(!pte_present(old_entry))) {
+		if (is_hugetlb_entry_migration(old_entry))
+			ret = -EBUSY;
+		else if (is_hugetlb_entry_hwpoisoned(old_entry))
+			ret = -EHWPOISON;
+		else {
+			WARN_ONCE(1, "Unexpected case of non-present HugeTLB PTE\n");
+			ret = -EINVAL;
+		}
+		goto skip;
+	}
+
+	if (!hugetlb_pte_present_leaf(hpte, old_entry)) {
+		WARN_ONCE(1, "HugeTLB present PTE is not leaf\n");
+		ret = -EAGAIN;
+		goto skip;
+	}
+	/* From now on old_entry is present leaf entry. */
+	ret = hugetlb_split_to_shift_present_leaf(mm, vma, old_entry,
+						  start, end, addr,
+						  hpte->shift,
+						  desired_shift);
+	if (ret)
+		goto abort;
+
+	/* Splitting done, new page table entries successfully setup. */
+	mmu_notifier_invalidate_range_end(&range);
+	return 0;
+abort:
+	/* Splitting failed, restoring to the original page table state. */
+	tlb_gather_mmu(&tlb, mm);
+	/* Decrement mapcount for all the split PTEs. */
+	__unmap_hugepage_range(&tlb, vma, start, end, NULL, ZAP_FLAG_DROP_MARKER);
+	/*
+	 * Free any newly allocated page table entries.
+	 * Ok if no new entries allocated at all.
+	 */
+	hugetlb_free_pgd_range(&tlb, start, end, start, end);
+	/* Decrement refcount for all the split PTEs. */
+	tlb_finish_mmu(&tlb);
+skip:
+	/* Restore the old entry. */
+	ptl = hugetlb_pte_lock(hpte);
+	set_huge_pte_at(mm, start, hpte->ptep, old_entry);
+	spin_unlock(ptl);
+	mmu_notifier_invalidate_range_end(&range);
+	return ret;
+}
+
 #endif /* CONFIG_HUGETLB_HIGH_GRANULARITY_MAPPING */
 
 /*
