@@ -385,6 +385,8 @@ retry:
 
 	while (src_addr < src_start + len) {
 		struct hugetlb_pte hpte;
+		bool inc = false;
+		bool is_continue = mode == MCOPY_ATOMIC_CONTINUE;
 		BUG_ON(dst_addr >= dst_start + len);
 
 		/*
@@ -399,20 +401,43 @@ retry:
 		mutex_lock(&hugetlb_fault_mutex_table[hash]);
 		hugetlb_vma_lock_read(dst_vma);
 
+		if (is_continue) {
+			/* do refcount overflow check */
+			page = find_lock_page(mapping, idx);
+			if (!page) {
+				hugetlb_vma_unlock_read(dst_vma);
+				mutex_unlock(&hugetlb_fault_mutex_table[hash]);
+				err = -EFAULT;
+				goto out_unlock;
+			}
+		}
+
 		if (use_hgm)
 			err = hugetlb_alloc_largest_pte(&hpte, dst_mm, dst_vma,
 							dst_addr,
-							dst_start + len);
+							dst_start + len, &inc);
 		else
 			err = hugetlb_full_walk_alloc(&hpte, dst_vma, dst_addr,
-						      vma_hpagesize);
+						      vma_hpagesize, NULL);
+
+		/*
+		 * Increment the mapcount now. hugetlb_mcopy_atomic_pte can
+		 * fail, and we still need to have the mapcount incremented.
+		 */
+		if (is_continue && inc)
+			page_dup_file_rmap(page, true);
+
 		if (err) {
+			if (is_continue) {
+				unlock_page(page);
+				put_page(page);
+			}
 			hugetlb_vma_unlock_read(dst_vma);
 			mutex_unlock(&hugetlb_fault_mutex_table[hash]);
 			goto out_unlock;
 		}
 
-		if (mode != MCOPY_ATOMIC_CONTINUE &&
+		if (!is_continue &&
 		    !huge_pte_none_mostly(huge_ptep_get(hpte.ptep))) {
 			err = -EEXIST;
 			hugetlb_vma_unlock_read(dst_vma);
@@ -420,6 +445,10 @@ retry:
 			goto out_unlock;
 		}
 
+		/*
+		 * This will take care of unlocking 'page' and lowering its
+		 * reference count.
+		 */
 		err = hugetlb_mcopy_atomic_pte(dst_mm, &hpte, dst_vma,
 					       dst_addr, src_addr, mode, &page,
 					       wp_copy);

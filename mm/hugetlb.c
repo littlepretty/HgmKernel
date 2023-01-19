@@ -132,7 +132,8 @@ void hugetlb_remove_rmap(struct page *subpage, unsigned long shift,
 	if (shift == huge_page_shift(h)) {
 		VM_BUG_ON_PAGE(subpage != hpage, subpage);
 		page_remove_rmap(subpage, vma, true);
-	} else {
+		put_page(hpage);
+	} else if (false) { /* we don't take this path anymore */
 		unsigned long nr_subpages = 1UL << (shift - PAGE_SHIFT);
 		struct page *final_page = &subpage[nr_subpages];
 
@@ -164,7 +165,7 @@ void hugetlb_add_file_rmap(struct page *subpage, unsigned long shift,
 	if (shift == huge_page_shift(h)) {
 		VM_BUG_ON_PAGE(subpage != hpage, subpage);
 		page_add_file_rmap(hpage, vma, true);
-	} else {
+	} else if (false) { /* we don't take this path anymore */
 		unsigned long nr_subpages = 1UL << (shift - PAGE_SHIFT);
 		struct page *final_page = &subpage[nr_subpages];
 
@@ -174,7 +175,8 @@ void hugetlb_add_file_rmap(struct page *subpage, unsigned long shift,
 		 */
 		for (; subpage < final_page; ++subpage)
 			page_add_file_rmap(subpage, vma, false);
-	}
+	} else
+		put_page(hpage);
 }
 
 /*
@@ -591,12 +593,15 @@ static bool has_same_uncharge_info(struct file_region *rg,
  *	ERR_PTR(-ENOMEM): could not allocate the new PMD
  */
 pmd_t *hugetlb_alloc_pmd(struct mm_struct *mm, struct hugetlb_pte *hpte,
-		unsigned long addr)
+		unsigned long addr, bool *allocated)
 {
 	spinlock_t *ptl = hugetlb_pte_lockptr(hpte);
 	pmd_t *new;
 	pud_t *pudp;
 	pud_t pud;
+
+	if (allocated)
+		*allocated = false;
 
 	if (hpte->level != HUGETLB_LEVEL_PUD)
 		return ERR_PTR(-EINVAL);
@@ -626,6 +631,9 @@ retry:
 		goto retry;
 	}
 
+	if (allocated)
+		*allocated = true;
+
 	mm_inc_nr_pmds(mm);
 	smp_wmb(); /* See comment in pmd_install() */
 	pud_populate(mm, pudp, new);
@@ -639,12 +647,15 @@ retry:
  * See the comment above hugetlb_alloc_pmd.
  */
 pte_t *hugetlb_alloc_pte(struct mm_struct *mm, struct hugetlb_pte *hpte,
-		unsigned long addr)
+		unsigned long addr, bool *allocated)
 {
 	spinlock_t *ptl = hugetlb_pte_lockptr(hpte);
 	pgtable_t new;
 	pmd_t *pmdp;
 	pmd_t pmd;
+
+	if (allocated)
+		*allocated = false;
 
 	if (hpte->level != HUGETLB_LEVEL_PMD)
 		return ERR_PTR(-EINVAL);
@@ -681,6 +692,9 @@ retry:
 		__free_page(new);
 		goto retry;
 	}
+
+	if (allocated)
+		*allocated = true;
 
 	mm_inc_nr_ptes(mm);
 	smp_wmb(); /* See comment in pmd_install() */
@@ -5230,6 +5244,7 @@ int copy_hugetlb_page_range(struct mm_struct *dst, struct mm_struct *src,
 	struct mmu_notifier_range range;
 	unsigned long last_addr_mask;
 	int ret = 0;
+	bool inc = false;
 
 	if (cow) {
 		mmu_notifier_range_init(&range, MMU_NOTIFY_CLEAR, 0, src,
@@ -5258,10 +5273,11 @@ int copy_hugetlb_page_range(struct mm_struct *dst, struct mm_struct *src,
 
 		if (hugetlb_full_walk(&src_hpte, src_vma, addr)) {
 			addr = (addr | last_addr_mask) + sz;
+			inc = false;
 			continue;
 		}
 		ret = hugetlb_full_walk_alloc(&dst_hpte, dst_vma, addr,
-				hugetlb_pte_size(&src_hpte));
+				hugetlb_pte_size(&src_hpte), &inc);
 		if (ret)
 			break;
 
@@ -5281,6 +5297,7 @@ int copy_hugetlb_page_range(struct mm_struct *dst, struct mm_struct *src,
 		if (hugetlb_pte_size(&dst_hpte) == sz &&
 		    page_count(virt_to_page(dst_pte)) > 1) {
 			addr = (addr | last_addr_mask) + sz;
+			inc = false;
 			continue;
 		}
 
@@ -5333,11 +5350,19 @@ again:
 			/* Retry the walk. */
 			spin_unlock(src_ptl);
 			spin_unlock(dst_ptl);
+			/*
+			 * Leave 'inc' as it is. We have to remember to
+			 * increment the mapcount/refcount later.
+			 */
 			continue;
 		} else {
+			bool inc_counts = inc ||
+					  hugetlb_pte_size(&src_hpte) == sz;
+
 			ptepage = pte_page(entry);
 			hpage = compound_head(ptepage);
-			get_page(hpage);
+			if (inc_counts)
+				get_page(hpage);
 
 			/*
 			 * Failing to duplicate the anon rmap is a rare case
@@ -5349,9 +5374,9 @@ again:
 			 * need to be without the pgtable locks since we could
 			 * sleep during the process.
 			 */
-			if (!PageAnon(hpage)) {
-				hugetlb_add_file_rmap(ptepage,
-						src_hpte.shift, h, src_vma);
+			if (!PageAnon(hpage))
+				if (inc_counts)
+					page_dup_file_rmap(hpage, true);
 			} else if (page_try_dup_anon_rmap(hpage, true,
 							  src_vma)) {
 				pte_t src_pte_old = entry;
@@ -5392,6 +5417,7 @@ again:
 				spin_unlock(src_ptl);
 				spin_unlock(dst_ptl);
 				addr += hugetlb_pte_size(&src_hpte);
+				inc = false;
 				continue;
 			}
 
@@ -5505,7 +5531,7 @@ int move_hugetlb_page_tables(struct vm_area_struct *vma,
 		}
 
 		if (hugetlb_full_walk_alloc(&dst_hpte, new_vma, new_addr,
-					hugetlb_pte_size(&src_hpte)))
+					hugetlb_pte_size(&src_hpte), NULL))
 			break;
 
 		move_hugetlb_pte(vma, old_addr, new_addr, &src_hpte, &dst_hpte);
@@ -5634,13 +5660,16 @@ static void __unmap_hugepage_range(struct mmu_gather *tlb, struct vm_area_struct
 			set_huge_pte_at(mm, address, hpte.ptep,
 					make_pte_marker(PTE_MARKER_UFFD_WP));
 		hugetlb_count_sub(hugetlb_pte_size(&hpte)/PAGE_SIZE, mm);
-		hugetlb_remove_rmap(subpage, hpte.shift, h, vma);
 
 		spin_unlock(ptl);
-		/*
-		 * Lower the reference count on the head page.
-		 */
-		tlb_remove_page_size(tlb, hpage, sz);
+
+		if (hugetlb_pte_size(&hpte) == sz) {
+			page_remove_rmap(hpage, vma, true);
+			/*
+			 * Lower the reference count on the head page.
+			 */
+			tlb_remove_page_size(tlb, hpage, sz);
+		}
 		/*
 		 * Bail out after unmapping reference page if supplied,
 		 * and there's only one PTE mapping this page.
@@ -6375,7 +6404,7 @@ vm_fault_t hugetlb_fault(struct mm_struct *mm, struct vm_area_struct *vma,
 	 * being called elsewhere and making the hpte no longer valid.
 	 */
 	hugetlb_vma_lock_read(vma);
-	if (hugetlb_full_walk_alloc(&hpte, vma, address, 0)) {
+	if (hugetlb_full_walk_alloc(&hpte, vma, address, 0, NULL)) {
 		hugetlb_vma_unlock_read(vma);
 		mutex_unlock(&hugetlb_fault_mutex_table[hash]);
 		return VM_FAULT_OOM;
@@ -6554,16 +6583,10 @@ int hugetlb_mcopy_atomic_pte(struct mm_struct *dst_mm,
 	struct folio *folio;
 	struct page *subpage;
 	int writable;
-	bool page_in_pagecache = false, refcount_overflow = false;
+	bool page_in_pagecache = false;
 
 	if (is_continue) {
-		folio = hugetlb_try_find_lock_folio(mapping, idx,
-						    &refcount_overflow);
-		if (refcount_overflow)
-			goto out;
-		ret = -EFAULT;
-		if (!folio)
-			goto out;
+		page = *pagep;
 		page_in_pagecache = true;
 	} else if (!*pagep) {
 		/* If a page already exists, then it's UFFDIO_COPY for
@@ -7084,7 +7107,7 @@ long hugetlb_change_protection(struct vm_area_struct *vma,
 			 * the hstate-level PTE.
 			 */
 			if (!hugetlb_full_walk_alloc(&hpte, vma,
-						     address, psize)) {
+						     address, psize, NULL)) {
 				base_pages = -ENOMEM;
 				break;
 			}
@@ -7633,10 +7656,13 @@ bool want_pmd_share(struct vm_area_struct *vma, unsigned long addr)
  */
 static int __hugetlb_hgm_walk(struct mm_struct *mm, struct vm_area_struct *vma,
 			      struct hugetlb_pte *hpte, unsigned long addr,
-			      unsigned long sz, bool alloc)
+			      unsigned long sz, bool alloc, bool *inc)
 {
 	int ret = 0;
 	pte_t pte;
+
+	if (inc)
+		*inc = false;
 
 	if (WARN_ON_ONCE(sz < PAGE_SIZE))
 		return -EINVAL;
@@ -7648,6 +7674,9 @@ static int __hugetlb_hgm_walk(struct mm_struct *mm, struct vm_area_struct *vma,
 	hugetlb_walk_lock_check(vma);
 
 	while (hugetlb_pte_size(hpte) > sz && !ret) {
+		bool at_hstate = hpte->shift ==
+				 huge_page_shift(hstate_vma(vma));
+
 		pte = huge_ptep_get(hpte->ptep);
 		if (!pte_present(pte)) {
 			if (!alloc)
@@ -7656,7 +7685,8 @@ static int __hugetlb_hgm_walk(struct mm_struct *mm, struct vm_area_struct *vma,
 				return -EEXIST;
 		} else if (hugetlb_pte_present_leaf(hpte, pte))
 			return 0;
-		ret = hugetlb_walk_step(mm, hpte, addr, sz);
+		ret = hugetlb_walk_step(mm, hpte, addr, sz,
+				at_hstate ? inc : NULL);
 	}
 
 	return ret;
@@ -7671,14 +7701,15 @@ static int hugetlb_hgm_walk(struct hugetlb_pte *hpte,
 			    struct vm_area_struct *vma,
 			    unsigned long addr,
 			    unsigned long target_sz,
-			    bool alloc)
+			    bool alloc,
+			    bool *inc)
 {
 	struct hstate *h = hstate_vma(vma);
 
 	hugetlb_pte_init(vma->vm_mm, hpte, ptep, huge_page_shift(h),
 			 hpage_size_to_level(huge_page_size(h)));
 	return __hugetlb_hgm_walk(vma->vm_mm, vma, hpte, addr, target_sz,
-				  alloc);
+				  alloc, inc);
 }
 
 /*
@@ -7698,7 +7729,7 @@ void hugetlb_full_walk_continue(struct hugetlb_pte *hpte,
 {
 	/* __hugetlb_hgm_walk will never fail with these arguments. */
 	WARN_ON_ONCE(__hugetlb_hgm_walk(vma->vm_mm, vma, hpte, addr,
-					PAGE_SIZE, false));
+					PAGE_SIZE, false, NULL));
 }
 
 /*
@@ -7726,7 +7757,8 @@ int hugetlb_full_walk(struct hugetlb_pte *hpte,
 		return -ENOMEM;
 
 	/* hugetlb_hgm_walk will never fail with these arguments. */
-	WARN_ON_ONCE(hugetlb_hgm_walk(hpte, ptep, vma, addr, PAGE_SIZE, false));
+	WARN_ON_ONCE(hugetlb_hgm_walk(hpte, ptep, vma, addr,
+				PAGE_SIZE, false, NULL));
 	return 0;
 }
 
@@ -7740,7 +7772,8 @@ int hugetlb_full_walk(struct hugetlb_pte *hpte,
 int hugetlb_full_walk_alloc(struct hugetlb_pte *hpte,
 				   struct vm_area_struct *vma,
 				   unsigned long addr,
-				   unsigned long target_sz)
+				   unsigned long target_sz,
+				   bool *inc)
 {
 	struct hstate *h = hstate_vma(vma);
 	unsigned long sz = huge_page_size(h);
@@ -7756,11 +7789,11 @@ int hugetlb_full_walk_alloc(struct hugetlb_pte *hpte,
 
 	if (!target_sz) {
 		WARN_ON_ONCE(hugetlb_hgm_walk(hpte, ptep, vma, addr,
-					      PAGE_SIZE, false));
+					      PAGE_SIZE, false, NULL));
 		return 0;
 	}
 
-	return hugetlb_hgm_walk(hpte, ptep, vma, addr, target_sz, true);
+	return hugetlb_hgm_walk(hpte, ptep, vma, addr, target_sz, true, inc);
 }
 
 #ifdef CONFIG_ARCH_WANT_GENERAL_HUGETLB
@@ -7842,21 +7875,21 @@ pte_t *huge_pte_offset(struct mm_struct *mm,
  * not change levels, then its PTL must also stay the same.
  */
 int hugetlb_walk_step(struct mm_struct *mm, struct hugetlb_pte *hpte,
-		      unsigned long addr, unsigned long sz)
+		      unsigned long addr, unsigned long sz, bool *allocated)
 {
 	pte_t *ptep;
 	spinlock_t *ptl;
 
 	switch (hpte->level) {
 	case HUGETLB_LEVEL_PUD:
-		ptep = (pte_t *)hugetlb_alloc_pmd(mm, hpte, addr);
+		ptep = (pte_t *)hugetlb_alloc_pmd(mm, hpte, addr, allocated);
 		if (IS_ERR(ptep))
 			return PTR_ERR(ptep);
 		hugetlb_pte_init(mm, hpte, ptep, PMD_SHIFT,
 				 HUGETLB_LEVEL_PMD);
 		break;
 	case HUGETLB_LEVEL_PMD:
-		ptep = hugetlb_alloc_pte(mm, hpte, addr);
+		ptep = hugetlb_alloc_pte(mm, hpte, addr, allocated);
 		if (IS_ERR(ptep))
 			return PTR_ERR(ptep);
 		ptl = pte_lockptr(mm, (pmd_t *)hpte->ptep);
@@ -7957,7 +7990,7 @@ static unsigned int __shift_for_hstate(struct hstate *h)
  */
 int hugetlb_alloc_largest_pte(struct hugetlb_pte *hpte, struct mm_struct *mm,
 			      struct vm_area_struct *vma, unsigned long start,
-			      unsigned long end)
+			      unsigned long end, bool *inc)
 {
 	struct hstate *h = hstate_vma(vma), *tmp_h;
 	unsigned int shift;
@@ -7973,7 +8006,7 @@ int hugetlb_alloc_largest_pte(struct hugetlb_pte *hpte, struct mm_struct *mm,
 	}
 	return -EINVAL;
 found:
-	ret = hugetlb_full_walk_alloc(hpte, vma, start, sz);
+	ret = hugetlb_full_walk_alloc(hpte, vma, start, sz, inc);
 	if (ret)
 		return ret;
 
@@ -8048,9 +8081,18 @@ static int __hugetlb_collapse(struct mm_struct *mm, struct vm_area_struct *vma,
 	mmu_notifier_invalidate_range_start(&range);
 
 	while (curr < end) {
-		ret = hugetlb_alloc_largest_pte(&hpte, mm, vma, curr, end);
-		if (ret)
+		bool inc;
+
+		idx = vma_hugecache_offset(h, vma, curr);
+		hpage = find_get_page(mapping, idx);
+
+		ret = hugetlb_alloc_largest_pte(&hpte, mm, vma, curr, end, &inc);
+		if (unlikely(inc))
+			page_dup_file_rmap(hpage, true);
+
+		if (ret) {
 			goto out;
+		}
 
 		entry = huge_ptep_get(hpte.ptep);
 

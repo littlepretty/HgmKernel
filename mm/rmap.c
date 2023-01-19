@@ -1770,15 +1770,17 @@ discard:
 		 * See Documentation/mm/mmu_notifier.rst
 		 */
 		if (folio_test_hugetlb(folio))
-			hugetlb_remove_rmap(subpage,
-					pvmw.pte_order + PAGE_SHIFT,
-					hstate_vma(vma), vma);
-		else
+			if (pvmw.pte_order == huge_page_order(hstate_vma(vma))) {
+				page_remove_rmap(hpage, vma, true);
+				folio_put(folio);
+			}
+		else {
 			page_remove_rmap(subpage, vma, false);
+			folio_put(folio);
+		}
 
 		if (vma->vm_flags & VM_LOCKED)
 			mlock_drain_local();
-		folio_put(folio);
 	}
 
 	mmu_notifier_invalidate_range_end(&range);
@@ -2138,14 +2140,16 @@ static bool try_to_migrate_one(struct folio *folio, struct vm_area_struct *vma,
 		 * See Documentation/mm/mmu_notifier.rst
 		 */
 		if (folio_test_hugetlb(folio))
-			hugetlb_remove_rmap(subpage,
-					pvmw.pte_order + PAGE_SHIFT,
-					hstate_vma(vma), vma);
-		else
+			if (pvmw.pte_order == huge_page_order(hstate_vma(vma))) {
+				page_remove_rmap(hpage, vma, true);
+				folio_put(folio);
+			}
+		else {
+			folio_put(folio);
 			page_remove_rmap(subpage, vma, false);
+		}
 		if (vma->vm_flags & VM_LOCKED)
 			mlock_drain_local();
-		folio_put(folio);
 	}
 
 	mmu_notifier_invalidate_range_end(&range);
