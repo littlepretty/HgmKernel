@@ -8203,6 +8203,33 @@ int hugetlb_collapse(struct mm_struct *mm, unsigned long start,
 	return ret;
 }
 
+int hugetlb_enable_hgm_vma(struct vm_area_struct *vma)
+{
+	if (hugetlb_hgm_enabled(vma))
+		return 0;
+
+	if (!is_vm_hugetlb_page(vma)) {
+		pr_warn("VMA=[%#lx, %#lx) is not HugeTLB\n",
+			vma->vm_start, vma->vm_end);
+		return -EINVAL;
+	}
+
+	if (!hugetlb_hgm_eligible(vma)) {
+		pr_warn("VMA=[%#lx, %#lx) is not HGM eligible\n",
+			vma->vm_start, vma->vm_end);
+		return -EINVAL;
+	}
+
+	hugetlb_unshare_all_pmds(vma);
+
+	/*
+	 * TODO: add the ability to tell if HGM is enabled by kernel
+	 * (for HWPOISON unmapping) or by userspace (via MADV_SPLIT).
+	 */
+	vm_flags_set(vma, VM_HUGETLB_HGM);
+	return 0;
+}
+
 /*
  * Find the optimal HugeTLB PTE shift that @desired_addr could be mapped at.
  */

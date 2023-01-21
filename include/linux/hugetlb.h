@@ -1266,6 +1266,7 @@ int hugetlb_alloc_largest_pte(struct hugetlb_pte *hpte, struct mm_struct *mm,
 			      unsigned long end);
 int hugetlb_collapse(struct mm_struct *mm, unsigned long start,
 		     unsigned long end);
+int hugetlb_enable_hgm_vma(struct vm_area_struct *vma);
 int hugetlb_split_to_shift(struct mm_struct *mm, struct vm_area_struct *vma,
 			   struct hugetlb_pte *hpte, unsigned long addr,
 			   unsigned int desired_shift);
@@ -1292,6 +1293,10 @@ int hugetlb_alloc_largest_pte(struct hugetlb_pte *hpte, struct mm_struct *mm,
 static inline
 int hugetlb_collapse(struct mm_struct *mm, unsigned long start,
 		     unsigned long end)
+{
+	return -EINVAL;
+}
+int hugetlb_enable_hgm_vma(struct vm_area_struct *vma)
 {
 	return -EINVAL;
 }

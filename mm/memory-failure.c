@@ -1479,6 +1479,73 @@ static int get_hwpoison_page(struct page *p, unsigned long flags)
 	return ret;
 }
 
+#ifdef CONFIG_HUGETLB_HIGH_GRANULARITY_MAPPING
+/*
+ * For each HGM-eligible VMA that the poisoned page mapped to, create new
+ * HGM mapping for hugepage @folio and make sure @poisoned_page is mapped
+ * by a PAGESIZE level PTE. Caller (hwpoison_user_mappings) must ensure
+ * 1. folio's address space (mapping) is locked in write mode.
+ * 2. folio is locked.
+ */
+static void try_to_split_huge_mapping(struct folio *folio,
+				      struct page *poisoned_page)
+{
+	struct address_space *mapping = folio_mapping(folio);
+	pgoff_t pgoff_start;
+	pgoff_t pgoff_end;
+	struct vm_area_struct *vma;
+	unsigned long poisoned_addr;
+	unsigned long head_addr;
+	struct hugetlb_pte hpte;
+
+	if (WARN_ON(!mapping))
+		return;
+
+	VM_BUG_ON_FOLIO(!folio_test_locked(folio), folio);
+
+	pgoff_start = folio_pgoff(folio);
+	pgoff_end = pgoff_start + folio_nr_pages(folio) - 1;
+
+	vma_interval_tree_foreach(vma, &mapping->i_mmap, pgoff_start, pgoff_end) {
+		/* Enable HGM on HGM-eligible VMAs. */
+		if (!hugetlb_hgm_eligible(vma))
+			continue;
+
+		i_mmap_assert_locked(vma->vm_file->f_mapping);
+		if (hugetlb_enable_hgm_vma(vma)) {
+			pr_err("Failed to enable HGM on eligible VMA=[%#lx, %#lx)\n",
+				vma->vm_start, vma->vm_end);
+			continue;
+		}
+
+		poisoned_addr = vma_address(poisoned_page, vma);
+		head_addr = vma_address(folio_page(folio, 0), vma);
+		/*
+		 * Get the hugetlb_pte of the PUD-mapped hugepage first,
+		 * then split the PUD entry into PMD + PTE entries.
+		 *
+		 * Both getting original huge PTE and splitting requires write
+		 * lock on vma->vm_file->f_mapping, which caller
+		 * (e.g. hwpoison_user_mappings) should already acquired.
+		 */
+		if (hugetlb_full_walk(&hpte, vma, head_addr))
+			continue;
+
+		if (hugetlb_split_to_shift(vma->vm_mm, vma, &hpte,
+					   poisoned_addr, PAGE_SHIFT)) {
+			pr_err("Failed to split huge mapping: pfn=%#lx, vaddr=%#lx in VMA=[%#lx, %#lx)\n",
+				page_to_pfn(poisoned_page), poisoned_addr,
+				vma->vm_start, vma->vm_end);
+		}
+	}
+}
+#else
+static void try_to_split_huge_mapping(struct folio *folio,
+				      struct page *poisoned_page)
+{
+}
+#endif /* CONFIG_HUGETLB_HIGH_GRANULARITY_MAPPING */
+
 /*
  * Do all that is necessary to remove user space mappings. Unmap
  * the pages and send SIGBUS to the processes if the data was dirty.
@@ -1555,6 +1622,7 @@ static bool hwpoison_user_mappings(struct page *p, unsigned long pfn,
 		 */
 		mapping = hugetlb_page_mapping_lock_write(hpage);
 		if (mapping) {
+			try_to_split_huge_mapping(folio, p);
 			try_to_unmap(folio, ttu|TTU_RMAP_LOCKED);
 			i_mmap_unlock_write(mapping);
 		} else
