@@ -1318,21 +1318,21 @@ void page_add_file_rmap(struct page *page, struct vm_area_struct *vma,
 	int nr = 0, nr_pmdmapped = 0;
 	bool first;
 
-	VM_BUG_ON_PAGE(compound && !PageTransHuge(page), page);
+	VM_BUG_ON_PAGE(compound && !PageTransHuge(page)
+				&& !folio_test_hugetlb(folio), page);
 
 	/* Is page being mapped by PTE? Is this its first map to be added? */
 	if (likely(!compound)) {
 		first = atomic_inc_and_test(&page->_mapcount);
 		nr = first;
-		if (first && folio_test_large(folio)) {
+		if (first && folio_test_large(folio)
+			  && !folio_test_hugetlb(folio)) {
 			nr = atomic_inc_return_relaxed(mapped);
 			nr = (nr < COMPOUND_MAPPED);
 		}
-	} else if (folio_test_pmd_mappable(folio)) {
-		/* That test is redundant: it's for safety or to optimize out */
-
+	} else {
 		first = atomic_inc_and_test(&folio->_entire_mapcount);
-		if (first) {
+		if (first && !folio_test_hugetlb(folio)) {
 			nr = atomic_add_return_relaxed(COMPOUND_MAPPED, mapped);
 			if (likely(nr < COMPOUND_MAPPED + COMPOUND_MAPPED)) {
 				nr_pmdmapped = folio_nr_pages(folio);
@@ -1346,6 +1346,9 @@ void page_add_file_rmap(struct page *page, struct vm_area_struct *vma,
 			}
 		}
 	}
+
+	if (folio_test_hugetlb(folio))
+		return;
 
 	if (nr_pmdmapped)
 		__lruvec_stat_mod_folio(folio, folio_test_swapbacked(folio) ?
@@ -1376,8 +1379,7 @@ void page_remove_rmap(struct page *page, struct vm_area_struct *vma,
 	VM_BUG_ON_PAGE(compound && !PageHead(page), page);
 
 	/* Hugetlb pages are not counted in NR_*MAPPED */
-	if (unlikely(folio_test_hugetlb(folio))) {
-		/* hugetlb pages are always mapped with pmds */
+	if (unlikely(folio_test_hugetlb(folio)) && compound) {
 		atomic_dec(&folio->_entire_mapcount);
 		return;
 	}
@@ -1386,15 +1388,14 @@ void page_remove_rmap(struct page *page, struct vm_area_struct *vma,
 	if (likely(!compound)) {
 		last = atomic_add_negative(-1, &page->_mapcount);
 		nr = last;
-		if (last && folio_test_large(folio)) {
+		if (last && folio_test_large(folio)
+			 && !folio_test_hugetlb(folio)) {
 			nr = atomic_dec_return_relaxed(mapped);
 			nr = (nr < COMPOUND_MAPPED);
 		}
-	} else if (folio_test_pmd_mappable(folio)) {
-		/* That test is redundant: it's for safety or to optimize out */
-
+	} else {
 		last = atomic_add_negative(-1, &folio->_entire_mapcount);
-		if (last) {
+		if (last && !folio_test_hugetlb(folio)) {
 			nr = atomic_sub_return_relaxed(COMPOUND_MAPPED, mapped);
 			if (likely(nr < COMPOUND_MAPPED)) {
 				nr_pmdmapped = folio_nr_pages(folio);
@@ -1408,6 +1409,9 @@ void page_remove_rmap(struct page *page, struct vm_area_struct *vma,
 			}
 		}
 	}
+
+	if (folio_test_hugetlb(folio))
+		return;
 
 	if (nr_pmdmapped) {
 		if (folio_test_anon(folio))
