@@ -1316,23 +1316,22 @@ void page_add_file_rmap(struct page *page,
 	atomic_t *mapped;
 	int nr = 0, nr_pmdmapped = 0;
 	bool first;
+	bool page_huge = PageTransHuge(page) || PageHuge(page);
 
-	VM_BUG_ON_PAGE(compound && !PageTransHuge(page), page);
+	VM_BUG_ON_PAGE(compound && !page_huge, page);
 
 	/* Is page being mapped by PTE? Is this its first map to be added? */
 	if (likely(!compound)) {
 		first = atomic_inc_and_test(&page->_mapcount);
 		nr = first;
-		if (first && PageCompound(page)) {
+		if (first && PageCompound(page) && !PageHuge(page)) {
 			mapped = subpages_mapcount_ptr(compound_head(page));
 			nr = atomic_inc_return_relaxed(mapped);
 			nr = (nr < COMPOUND_MAPPED);
 		}
-	} else if (PageTransHuge(page)) {
-		/* That test is redundant: it's for safety or to optimize out */
-
+	} else {
 		first = atomic_inc_and_test(compound_mapcount_ptr(page));
-		if (first) {
+		if (first && !PageHuge(page)) {
 			mapped = subpages_mapcount_ptr(page);
 			nr = atomic_add_return_relaxed(COMPOUND_MAPPED, mapped);
 			if (likely(nr < COMPOUND_MAPPED + COMPOUND_MAPPED)) {
@@ -1347,6 +1346,9 @@ void page_add_file_rmap(struct page *page,
 			}
 		}
 	}
+
+	if (PageHuge(page))
+		return;
 
 	if (nr_pmdmapped)
 		__mod_lruvec_page_state(page, PageSwapBacked(page) ?
@@ -1371,6 +1373,7 @@ void page_remove_rmap(struct page *page,
 	atomic_t *mapped;
 	int nr = 0, nr_pmdmapped = 0;
 	bool last;
+	bool page_huge = PageTransHuge(page) || PageHuge(page);
 
 	VM_BUG_ON_PAGE(compound && !PageHead(page), page);
 
@@ -1385,16 +1388,14 @@ void page_remove_rmap(struct page *page,
 	if (likely(!compound)) {
 		last = atomic_add_negative(-1, &page->_mapcount);
 		nr = last;
-		if (last && PageCompound(page)) {
+		if (last && PageCompound(page) && !PageHuge(page)) {
 			mapped = subpages_mapcount_ptr(compound_head(page));
 			nr = atomic_dec_return_relaxed(mapped);
 			nr = (nr < COMPOUND_MAPPED);
 		}
-	} else if (PageTransHuge(page)) {
-		/* That test is redundant: it's for safety or to optimize out */
-
+	} else {
 		last = atomic_add_negative(-1, compound_mapcount_ptr(page));
-		if (last) {
+		if (last && !PageHuge(page)) {
 			mapped = subpages_mapcount_ptr(page);
 			nr = atomic_sub_return_relaxed(COMPOUND_MAPPED, mapped);
 			if (likely(nr < COMPOUND_MAPPED)) {
@@ -1409,6 +1410,9 @@ void page_remove_rmap(struct page *page,
 			}
 		}
 	}
+
+	if (PageHuge(page))
+		return;
 
 	if (nr_pmdmapped) {
 		__mod_lruvec_page_state(page, PageAnon(page) ? NR_ANON_THPS :
