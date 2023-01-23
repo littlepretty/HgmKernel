@@ -1453,6 +1453,8 @@ static bool try_to_unmap_one(struct folio *folio, struct vm_area_struct *vma,
 	struct mmu_notifier_range range;
 	enum ttu_flags flags = (enum ttu_flags)(long)arg;
 	bool page_poisoned;
+	bool hgm_eligible = hugetlb_hgm_eligible(vma);
+	struct raw_hwp_page *hwp_page;
 
 	/*
 	 * When racing against e.g. zap_pte_range() on another cpu,
@@ -1525,6 +1527,29 @@ static bool try_to_unmap_one(struct folio *folio, struct vm_area_struct *vma,
 			 * in the case where the hugetlb page is poisoned.
 			 */
 			VM_BUG_ON_FOLIO(!page_poisoned, folio);
+
+			/*
+			 * When VMA is not HGM eligible, unmap at hugepage's
+			 * original P*D.
+			 *
+			 * When HGM is eligible:
+			 * - if original P*D is split to smaller P*Ds and
+			 *   PTEs, we skip subpage if it is not raw HWPoison
+			 *   page, or it was but was already unmapped.
+			 * - if original P*D is not split, skip unmapping
+			 *   and memory_failure result will be MF_IGNORED.
+			 */
+			if (hgm_eligible) {
+				if (pvmw.pte_order > 0)
+					continue;
+				hwp_page = find_in_raw_hwp_list(folio, subpage);
+				if (hwp_page == NULL)
+					continue;
+				if (hwp_page->nr_expected_unmaps ==
+				    hwp_page->nr_actual_unmaps)
+					continue;
+			}
+
 			/*
 			 * huge_pmd_unshare may unmap an entire PMD page.
 			 * There is no way of knowing exactly which PMDs may
@@ -1760,12 +1785,19 @@ discard:
 		 *
 		 * See Documentation/mm/mmu_notifier.rst
 		 */
-		if (folio_test_hugetlb(folio))
+		if (!folio_test_hugetlb(folio))
+			page_remove_rmap(subpage, vma, false);
+		else {
 			hugetlb_remove_rmap(subpage,
 					pvmw.pte_order + PAGE_SHIFT,
 					hstate_vma(vma), vma);
-		else
-			page_remove_rmap(subpage, vma, false);
+			if (hgm_eligible) {
+				VM_BUG_ON_FOLIO(pvmw.pte_order > 0, folio);
+				VM_BUG_ON_FOLIO(!hwp_page, folio);
+				VM_BUG_ON_FOLIO(subpage != hwp_page->page, folio);
+				++hwp_page->nr_actual_unmaps;
+			}
+		}
 
 		if (vma->vm_flags & VM_LOCKED)
 			mlock_drain_local();

@@ -1120,10 +1120,10 @@ static int me_swapcache_clean(struct page_state *ps, struct page *p)
 }
 
 /*
- * Huge pages. Needs work.
- * Issues:
- * - Error on hugepage is contained in hugepage unit (not in raw page unit.)
- *   To narrow down kill region to one page, we need to break up pmd.
+ * Huge pages.
+ * - Without HGM: Error on hugepage is contained in hugepage unit (not in
+ *   raw page unit).
+ * - With HGM: Kill region is narrowed down to just one page.
  */
 static int me_huge_page(struct page_state *ps, struct page *p)
 {
@@ -1131,6 +1131,7 @@ static int me_huge_page(struct page_state *ps, struct page *p)
 	struct page *hpage = compound_head(p);
 	struct address_space *mapping;
 	bool extra_pins = false;
+	struct raw_hwp_page *hwp_page = find_in_raw_hwp_list(page_folio(p), p);
 
 	if (!PageHuge(hpage))
 		return MF_DELAYED;
@@ -1157,7 +1158,8 @@ static int me_huge_page(struct page_state *ps, struct page *p)
 		}
 	}
 
-	if (has_extra_refcount(ps, p, extra_pins))
+	if (hwp_page->nr_expected_unmaps == 0 &&
+	    has_extra_refcount(ps, p, extra_pins))
 		res = MF_FAILED;
 
 	return res;
@@ -1497,24 +1499,30 @@ static void try_to_split_huge_mapping(struct folio *folio,
 	unsigned long poisoned_addr;
 	unsigned long head_addr;
 	struct hugetlb_pte hpte;
+	struct raw_hwp_page *hwp_page = NULL;
 
 	if (WARN_ON(!mapping))
 		return;
 
 	VM_BUG_ON_FOLIO(!folio_test_locked(folio), folio);
 
+	hwp_page = find_in_raw_hwp_list(folio, poisoned_page);
+	VM_BUG_ON_PAGE(!hwp_page, poisoned_page);
+
 	pgoff_start = folio_pgoff(folio);
 	pgoff_end = pgoff_start + folio_nr_pages(folio) - 1;
 
 	vma_interval_tree_foreach(vma, &mapping->i_mmap, pgoff_start, pgoff_end) {
+		++hwp_page->nr_vmas_mapped;
+
 		/* Enable HGM on HGM-eligible VMAs. */
 		if (!hugetlb_hgm_eligible(vma))
 			continue;
 
 		i_mmap_assert_locked(vma->vm_file->f_mapping);
 		if (hugetlb_enable_hgm_vma(vma)) {
-			pr_err("Failed to enable HGM on eligible VMA=[%#lx, %#lx)\n",
-				vma->vm_start, vma->vm_end);
+			pr_err("%#lx: failed to enable HGM on eligible VMA=[%#lx, %#lx)\n",
+				page_to_pfn(poisoned_page), vma->vm_start, vma->vm_end);
 			continue;
 		}
 
@@ -1528,15 +1536,21 @@ static void try_to_split_huge_mapping(struct folio *folio,
 		 * lock on vma->vm_file->f_mapping, which caller
 		 * (e.g. hwpoison_user_mappings) should already acquired.
 		 */
-		if (hugetlb_full_walk(&hpte, vma, head_addr))
+		if (hugetlb_full_walk(&hpte, vma, head_addr)) {
+			pr_err("%#lx: failed to PT-walk with HGM on eligible VMA=[%#lx, %#lx)\n",
+				page_to_pfn(poisoned_page), vma->vm_start, vma->vm_end);
 			continue;
+		}
 
 		if (hugetlb_split_to_shift(vma->vm_mm, vma, &hpte,
 					   poisoned_addr, PAGE_SHIFT)) {
-			pr_err("Failed to split huge mapping: pfn=%#lx, vaddr=%#lx in VMA=[%#lx, %#lx)\n",
+			pr_err("%#lx: Failed to split huge mapping: vaddr=%#lx in VMA=[%#lx, %#lx)\n",
 				page_to_pfn(poisoned_page), poisoned_addr,
 				vma->vm_start, vma->vm_end);
+			continue;
 		}
+
+		++hwp_page->nr_expected_unmaps;
 	}
 }
 #else
@@ -1545,6 +1559,47 @@ static void try_to_split_huge_mapping(struct folio *folio,
 {
 }
 #endif /* CONFIG_HUGETLB_HIGH_GRANULARITY_MAPPING */
+
+static bool is_unmapping_successful(struct folio *folio,
+				    struct page *poisoned_page)
+{
+	bool unmap_success = false;
+	struct raw_hwp_page *hwp_page = find_in_raw_hwp_list(folio, poisoned_page);
+
+	if (!folio_test_hugetlb(folio) ||
+	    folio_test_anon(folio) ||
+	    !IS_ENABLED(CONFIG_HUGETLB_HIGH_GRANULARITY_MAPPING)) {
+		unmap_success = folio_mapped(folio);
+		if (!unmap_success)
+			pr_err("%#lx: failed to unmap page (mapcount=%d)\n",
+				page_to_pfn(poisoned_page),
+				page_mapcount(folio_page(folio, 0)));
+
+		return unmap_success;
+	}
+
+	VM_BUG_ON_PAGE(!hwp_page, poisoned_page);
+
+	/*
+	 * Unmapping may not happen for some VMA:
+	 * - HGM-eligible VMA but @poisoned_page is not faulted yet: nothing
+	 *   needs to be done at this point yet until page fault handling.
+	 * - HGM-non-eliggible VMA: mapcount decreases by nr_subpages for each VMA,
+	 *   but not tracked so cannot tell if successfully unmapped from such VMA.
+	 */
+	if (hwp_page->nr_vmas_mapped != hwp_page->nr_expected_unmaps)
+		pr_info("%#lx: mapped by %d VMAs but %d unmappings are expected\n",
+			page_to_pfn(poisoned_page), hwp_page->nr_vmas_mapped,
+			hwp_page->nr_expected_unmaps);
+
+	unmap_success = hwp_page->nr_expected_unmaps == hwp_page->nr_actual_unmaps;
+
+	if (!unmap_success)
+		pr_err("%#lx: failed to unmap page (folio_mapcount=%d)\n",
+			page_to_pfn(poisoned_page), folio_mapcount(folio));
+
+	return unmap_success;
+}
 
 /*
  * Do all that is necessary to remove user space mappings. Unmap
@@ -1631,10 +1686,7 @@ static bool hwpoison_user_mappings(struct page *p, unsigned long pfn,
 		try_to_unmap(folio, ttu);
 	}
 
-	unmap_success = !page_mapped(hpage);
-	if (!unmap_success)
-		pr_err("%#lx: failed to unmap page (mapcount=%d)\n",
-		       pfn, page_mapcount(hpage));
+	unmap_success = is_unmapping_successful(folio, p);
 
 	/*
 	 * try_to_unmap() might put mlocked page in lru cache, so call
@@ -1827,6 +1879,31 @@ EXPORT_SYMBOL_GPL(mf_dax_kill_procs);
 
 #ifdef CONFIG_HUGETLB_PAGE
 
+/*
+ * Given a HWPOISON @subpage as raw page, find its location in @folio's
+ * _hugetlb_hwpoison. Return NULL if @subpage is not in the list.
+ */
+struct raw_hwp_page *find_in_raw_hwp_list(struct folio *folio,
+					  struct page *subpage)
+{
+	struct llist_node *t, *tnode;
+	struct llist_head *raw_hwp_head = raw_hwp_list_head(folio);
+	struct raw_hwp_page *hwp_page = NULL;
+	struct raw_hwp_page *p;
+
+	VM_BUG_ON_PAGE(PageHWPoison(subpage), subpage);
+
+	llist_for_each_safe(tnode, t, raw_hwp_head->first) {
+		p = container_of(tnode, struct raw_hwp_page, node);
+		if (subpage == p->page) {
+			hwp_page = p;
+			break;
+		}
+	}
+
+	return hwp_page;
+}
+
 static unsigned long __folio_free_raw_hwp(struct folio *folio, bool move_flag)
 {
 	struct llist_head *head;
@@ -1836,6 +1913,9 @@ static unsigned long __folio_free_raw_hwp(struct folio *folio, bool move_flag)
 	head = raw_hwp_list_head(folio);
 	llist_for_each_safe(tnode, t, head->first) {
 		struct raw_hwp_page *p = container_of(tnode, struct raw_hwp_page, node);
+
+		/* Ideally raw HWPoison pages are fully unmapped if possible. */
+		WARN_ON(p->nr_expected_unmaps != p->nr_actual_unmaps);
 
 		if (move_flag)
 			SetPageHWPoison(p->page);
@@ -1853,7 +1933,8 @@ static int folio_set_hugetlb_hwpoison(struct folio *folio, struct page *page)
 	struct llist_head *head;
 	struct raw_hwp_page *raw_hwp;
 	struct llist_node *t, *tnode;
-	int ret = folio_test_set_hwpoison(folio) ? -EHWPOISON : 0;
+	bool has_hwpoison = folio_test_set_hwpoison(folio);
+	bool hgm_enabled = IS_ENABLED(CONFIG_HUGETLB_HIGH_GRANULARITY_MAPPING);
 
 	/*
 	 * Once the hwpoison hugepage has lost reliable raw error info,
@@ -1873,9 +1954,20 @@ static int folio_set_hugetlb_hwpoison(struct folio *folio, struct page *page)
 	raw_hwp = kmalloc(sizeof(struct raw_hwp_page), GFP_ATOMIC);
 	if (raw_hwp) {
 		raw_hwp->page = page;
+		raw_hwp->nr_vmas_mapped = 0;
+		raw_hwp->nr_expected_unmaps = 0;
+		raw_hwp->nr_actual_unmaps = 0;
 		llist_add(&raw_hwp->node, head);
+		if (hgm_enabled)
+			/*
+			 * A new raw poisoned page. Don't return
+			 * HWPOISON. Error event will be counted
+			 * in action_result().
+			 */
+			return 0;
+
 		/* the first error event will be counted in action_result(). */
-		if (ret)
+		if (has_hwpoison)
 			num_poisoned_pages_inc(page_to_pfn(page));
 	} else {
 		/*
@@ -1889,8 +1981,16 @@ static int folio_set_hugetlb_hwpoison(struct folio *folio, struct page *page)
 		 * used any more, so free it.
 		 */
 		__folio_free_raw_hwp(folio, false);
+
+		/*
+		 * HGM relies on raw_hwp allocated and inserted to raw_hwp_list.
+		 */
+		if (hgm_enabled)
+			return -ENOMEM;
 	}
-	return ret;
+
+	BUG_ON(hgm_enabled);
+	return has_hwpoison ? -EHWPOISON : 0;
 }
 
 static unsigned long folio_free_raw_hwp(struct folio *folio, bool move_flag)
@@ -1936,6 +2036,7 @@ int __get_huge_page_for_hwpoison(unsigned long pfn, int flags,
 	struct page *page = pfn_to_page(pfn);
 	struct folio *folio = page_folio(page);
 	int ret = 2;	/* fallback to normal page handling */
+	int set_page_hwpoison = 0;
 	bool count_increased = false;
 
 	if (!folio_test_hugetlb(folio))
@@ -1956,8 +2057,9 @@ int __get_huge_page_for_hwpoison(unsigned long pfn, int flags,
 			goto out;
 	}
 
-	if (folio_set_hugetlb_hwpoison(folio, page)) {
-		ret = -EHWPOISON;
+	set_page_hwpoison = folio_set_hugetlb_hwpoison(folio, page);
+	if (set_page_hwpoison) {
+		ret = set_page_hwpoison;
 		goto out;
 	}
 
@@ -2004,7 +2106,7 @@ retry:
 			res = kill_accessing_process(current, folio_pfn(folio), flags);
 		}
 		return res;
-	} else if (res == -EBUSY) {
+	} else if (res == -EBUSY || res == -ENOMEM) {
 		if (!(flags & MF_NO_RETRY)) {
 			flags |= MF_NO_RETRY;
 			goto retry;

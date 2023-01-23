@@ -3522,19 +3522,37 @@ enum mf_action_page_type {
  */
 extern const struct attribute_group memory_failure_attr_group;
 
-#ifdef CONFIG_HUGETLB_PAGE
 /*
  * Struct raw_hwp_page represents information about "raw error page",
  * constructing singly linked list from ->_hugetlb_hwpoison field of folio.
+ * @node: the node in folio->_hugetlb_hwpoison list.
+ * @page: the raw HWPOISON page struct.
+ * @nr_vmas_mapped: the number of VMAs that map @page when detected.
+ * @nr_expected_unmaps: if a VMA that maps @page when detected is eligible
+ *   for high granularity mapping, @page is expected to be unmapped.
+ * @nr_actual_unmaps: how many times the raw page is actually unmapped.
  */
 struct raw_hwp_page {
 	struct llist_node node;
 	struct page *page;
+	int nr_vmas_mapped;
+	int nr_expected_unmaps;
+	int nr_actual_unmaps;
 };
 
+#ifdef CONFIG_HUGETLB_PAGE
 static inline struct llist_head *raw_hwp_list_head(struct folio *folio)
 {
 	return (struct llist_head *)&folio->_hugetlb_hwpoison;
+}
+
+struct raw_hwp_page *find_in_raw_hwp_list(struct folio *folio,
+					  struct page *subpage);
+#else
+static inline struct raw_hwp_page *find_in_raw_hwp_list(struct folio *folio,
+							struct page *subpage)
+{
+	return NULL;
 }
 #endif
 
