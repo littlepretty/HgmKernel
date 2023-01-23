@@ -5070,7 +5070,7 @@ again:
 			 * sleep during the process.
 			 */
 			if (!PageAnon(ptepage)) {
-				page_dup_file_rmap(ptepage, true);
+				page_add_file_rmap(ptepage, true);
 			} else if (page_try_dup_anon_rmap(ptepage, true,
 							  src_vma)) {
 				pte_t src_pte_old = entry;
@@ -5905,7 +5905,7 @@ static vm_fault_t hugetlb_no_page(struct mm_struct *mm,
 	if (anon_rmap)
 		hugepage_add_new_anon_rmap(page, vma, haddr);
 	else
-		page_dup_file_rmap(page, true);
+		page_add_file_rmap(page, true);
 	new_pte = make_huge_pte(vma, page, ((vma->vm_flags & VM_WRITE)
 				&& (vma->vm_flags & VM_SHARED)));
 	/*
@@ -6287,7 +6287,7 @@ int hugetlb_mcopy_atomic_pte(struct mm_struct *dst_mm,
 		goto out_release_unlock;
 
 	if (page_in_pagecache)
-		page_dup_file_rmap(page, true);
+		page_add_file_rmap(page, true);
 	else
 		hugepage_add_new_anon_rmap(page, dst_vma, dst_addr);
 
