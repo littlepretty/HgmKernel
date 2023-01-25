@@ -8137,8 +8137,8 @@ next_hpte:
 out:
 	i_mmap_unlock_write(vma->vm_file->f_mapping);
 	hugetlb_vma_unlock_write(vma);
-	tlb_finish_mmu(&tlb);
 	mmu_notifier_invalidate_range_end(&range);
+	tlb_finish_mmu(&tlb);
 	return ret;
 }
 
