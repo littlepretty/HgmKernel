@@ -39,6 +39,10 @@
 #define MADV_SPLIT 26
 #endif
 
+#ifndef NUM_HWPOISON_PAGES
+#define NUM_HWPOISON_PAGES 3UL
+#endif
+
 #define PREFIX " ... "
 #define ERROR_PREFIX " !!! "
 
@@ -241,6 +245,9 @@ static int test_sigbus(char *addr, bool poison)
 				sigbus_addr, addr);
 	else if (poison && !was_mceerr)
 		printf(ERROR_PREFIX "didn't get an MCEERR?\n");
+	else if (!poison && was_mceerr)
+		printf(ERROR_PREFIX "got BUS_MCEERR_AR sigbus on expected healthy address: %p\n",
+		       sigbus_addr);
 	else
 		ret = 0;
 out:
@@ -272,43 +279,176 @@ static int read_event_from_uffd(int *uffd, pthread_t *pthread)
 	return 0;
 }
 
-static int test_sigbus_range(char *primary_map, size_t len, bool hwpoison)
+struct range_exclude_pages {
+	/* Starting address of the buffer. */
+	char *mapping;
+	/* Length of the buffer in bytes. */
+	size_t length;
+	/* The value that each byte in buffer should equal to. */
+	char value;
+	/*
+	 * PAGESIZE aligned addresses excluded from the checking,
+	 * e.g. if PAGE_SIZE=4k, for each addr in excludes,
+	 * skips checking on [addr, addr + 4096).
+	 */
+	unsigned long excluded[NUM_HWPOISON_PAGES];
+};
+
+static int check_range_exclude_pages(struct range_exclude_pages *range)
 {
 	const unsigned long pagesize = getpagesize();
-	const int num_checks = 512;
-	unsigned long bytes_per_check = len/num_checks;
-	int i;
+	unsigned long excluded_index;
+	unsigned long page_index;
+	bool should_skip;
+	size_t i = 0;
+	size_t j = 0;
 
-	printf(PREFIX "checking that we can't access "
-	       "(%d addresses within %p -> %p)\n",
-	       num_checks, primary_map, primary_map + len);
-
-	if (pagesize > bytes_per_check)
-		bytes_per_check = pagesize;
-
-	for (i = 0; i < len; i += bytes_per_check)
-		if (test_sigbus(primary_map + i, hwpoison) < 0)
-			return 1;
-	/* check very last byte, because we left it unmapped */
-	if (test_sigbus(primary_map + len - 1, hwpoison))
-		return 1;
+	while (i < range->length) {
+		page_index = ((unsigned long)(range->mapping + i)) / pagesize;
+		should_skip = false;
+		for (j = 0; j < NUM_HWPOISON_PAGES; ++j) {
+			excluded_index = range->excluded[j] / pagesize;
+			if (page_index == excluded_index) {
+				should_skip = true;
+				break;
+			}
+		}
+		if (should_skip) {
+			printf(PREFIX "skip excluded addr range [%#lx, %#lx)\n",
+				(unsigned long)(range->mapping + i),
+				(unsigned long)(range->mapping + i + pagesize));
+			i += pagesize;
+			continue;
+		}
+		if (range->mapping[i] != range->value) {
+			printf(ERROR_PREFIX "mismatch at %p (%d != %d)\n",
+			       &range->mapping[i], range->mapping[i], range->value);
+			return -1;
+		}
+		++i;
+	}
 
 	return 0;
 }
 
-static enum test_status test_hwpoison(char *primary_map, size_t len)
+enum test_status verify_raw_pages(char *map, size_t len,
+				  unsigned long excluded[NUM_HWPOISON_PAGES])
 {
-	printf(PREFIX "poisoning %p -> %p\n", primary_map, primary_map + len);
-	if (madvise(primary_map, len, MADV_HWPOISON) < 0) {
+	const unsigned long pagesize = getpagesize();
+	unsigned long size, offset, value;
+	size_t j = 0;
+
+	for (size = len / 2, offset = 0, value = 1; size > pagesize;
+	     offset += size, size /= 2, ++value) {
+		struct range_exclude_pages range = {
+			.mapping = map + offset,
+			.length = size,
+			.value = value,
+		};
+		for (j = 0; j < NUM_HWPOISON_PAGES; ++j)
+			range.excluded[j] = excluded[j];
+
+		printf(PREFIX "checking non-poisoned range [%p, %p) "
+			"(len=%#lx) per-byte value=%lu\n",
+			range.mapping, range.mapping + range.length,
+			range.length, value);
+		if (check_range_exclude_pages(&range))
+			return TEST_FAILED;
+
+		printf(PREFIX PREFIX "good\n");
+	}
+
+	return TEST_PASSED;
+}
+
+static int read_hwpoison_pages(unsigned long *nr_hwp_pages)
+{
+	const unsigned long pagesize = getpagesize();
+	char buffer[256] = {0};
+	char *cmd = "cat /proc/meminfo | grep -i HardwareCorrupted | grep -o '[0-9]*'";
+	FILE *cmdfile = popen(cmd, "r");
+
+	if (!(fgets(buffer, sizeof(buffer), cmdfile))) {
+		perror("failed to read HardwareCorrupted from /proc/meminfo\n");
+		return -1;
+	}
+	pclose(cmdfile);
+	*nr_hwp_pages = atoll(buffer) * 1024 / pagesize;
+
+	return 0;
+}
+
+static enum test_status test_hwpoison_one_raw_page(char *hwpoison_addr)
+{
+	const unsigned long pagesize = getpagesize();
+
+	printf(PREFIX "poisoning [%p, %p) (len=%#lx)\n",
+	       hwpoison_addr, hwpoison_addr + pagesize, pagesize);
+	if (madvise(hwpoison_addr, pagesize, MADV_HWPOISON) < 0) {
 		perror(ERROR_PREFIX "MADV_HWPOISON failed");
 		return TEST_SKIPPED;
 	}
 
-	return test_sigbus_range(primary_map, len, true)
-		? TEST_FAILED : TEST_PASSED;
+	printf(PREFIX "checking poisoned range [%p, %p) (len=%#lx)\n",
+	       hwpoison_addr, hwpoison_addr + pagesize, pagesize);
+	if (test_sigbus(hwpoison_addr, true) < 0)
+		return TEST_FAILED;
+
+	return TEST_PASSED;
 }
 
-static int test_fork(int uffd, char *primary_map, size_t len)
+static enum test_status test_hwpoison_present(char *map, size_t len,
+					      bool already_injected)
+{
+	const unsigned long pagesize = getpagesize();
+	const unsigned long hwpoison_next = 128;
+	unsigned long nr_hwpoison_pages_before, nr_hwpoison_pages_after;
+	enum test_status ret;
+	size_t i;
+	char *hwpoison_addr = map;
+	unsigned long hwpoison_addrs[NUM_HWPOISON_PAGES];
+
+	if (hwpoison_next * (NUM_HWPOISON_PAGES - 1) >= (len / pagesize)) {
+		printf(ERROR_PREFIX "max hwpoison_addr out of range");
+		return TEST_SKIPPED;
+	}
+
+	for (i = 0; i < NUM_HWPOISON_PAGES; ++i) {
+		hwpoison_addrs[i] = (unsigned long)hwpoison_addr;
+		hwpoison_addr += hwpoison_next * pagesize;
+	}
+
+	if (already_injected)
+		return verify_raw_pages(map, len, hwpoison_addrs);
+
+	if (read_hwpoison_pages(&nr_hwpoison_pages_before)) {
+		printf(ERROR_PREFIX "check #HWPOISON pages\n");
+		return TEST_SKIPPED;
+	}
+	printf(PREFIX "Before injections, #HWPOISON pages = %ld\n", nr_hwpoison_pages_before);
+
+	for (i = 0; i < NUM_HWPOISON_PAGES; ++i) {
+		ret = test_hwpoison_one_raw_page((char *)hwpoison_addrs[i]);
+		if (ret != TEST_PASSED)
+			return ret;
+	}
+
+	if (read_hwpoison_pages(&nr_hwpoison_pages_after)) {
+		printf(ERROR_PREFIX "check #HWPOISON pages\n");
+		return TEST_SKIPPED;
+	}
+	printf(PREFIX "After injections, #HWPOISON pages = %ld\n", nr_hwpoison_pages_after);
+
+	if (nr_hwpoison_pages_after - nr_hwpoison_pages_before != NUM_HWPOISON_PAGES) {
+		printf(ERROR_PREFIX "delta #HWPOISON pages != %ld",
+			NUM_HWPOISON_PAGES);
+		return TEST_FAILED;
+	}
+
+	return verify_raw_pages(map, len, hwpoison_addrs);
+}
+
+int test_fork(int uffd, char *primary_map, size_t len)
 {
 	int status;
 	int ret = 0;
@@ -360,7 +500,6 @@ static int test_fork(int uffd, char *primary_map, size_t len)
 
 	pthread_join(uffd_thd, NULL);
 	return ret;
-
 }
 
 static int uffd_register(int uffd, char *primary_map, unsigned long len,
@@ -394,6 +533,7 @@ test_hgm(int fd, size_t hugepagesize, size_t len, enum test_type type)
 	bool uffd_wp = type == TEST_UFFDWP;
 	bool verify = type == TEST_DEFAULT;
 	int register_args;
+	enum test_status hwp_status = TEST_SKIPPED;
 
 	if (ftruncate(fd, len) < 0) {
 		perror(ERROR_PREFIX "ftruncate failed");
@@ -489,10 +629,10 @@ test_hgm(int fd, size_t hugepagesize, size_t len, enum test_type type)
 	 * mapping.
 	 */
 	if (hwpoison) {
-		enum test_status new_status = test_hwpoison(primary_map, len);
-
-		if (new_status != TEST_PASSED) {
-			status = new_status;
+		/* test_hwpoison can fail with TEST_SKIPPED. */
+		hwp_status = test_hwpoison_present(primary_map, len, false);
+		if (hwp_status != TEST_PASSED) {
+			status = hwp_status;
 			goto done;
 		}
 	}
@@ -539,7 +679,7 @@ test_hgm(int fd, size_t hugepagesize, size_t len, enum test_type type)
 	/*
 	 * Verify that memory is still poisoned.
 	 */
-	if (hwpoison && test_sigbus_range(primary_map, len, true))
+	if (hwpoison && test_hwpoison_present(primary_map, len, true))
 		goto done;
 
 	status = TEST_PASSED;
