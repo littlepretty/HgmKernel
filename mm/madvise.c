@@ -1038,8 +1038,14 @@ static int madvise_collapse(struct vm_area_struct *vma,
 			    unsigned long start, unsigned long end)
 {
 	if (is_vm_hugetlb_page(vma)) {
-		*prev = vma;
-		return hugetlb_collapse(vma->vm_mm, vma, start, end);
+		struct mm_struct *mm = vma->vm_mm;
+		int ret;
+
+		*prev = NULL; /* tell sys_madvise we dropped the mmap lock */
+		mmap_read_unlock(mm);
+		ret = hugetlb_collapse(mm, start, end);
+		mmap_read_lock(mm);
+		return ret;
 	}
 
 	return madvise_collapse_thp(vma, prev, start, end);

@@ -8006,8 +8006,8 @@ static bool hugetlb_hgm_collapsable(struct vm_area_struct *vma)
  *
  * If high-granularity PTEs are uffd-wp markers, those markers will be dropped.
  */
-int hugetlb_collapse(struct mm_struct *mm, struct vm_area_struct *vma,
-			    unsigned long start, unsigned long end)
+static int __hugetlb_collapse(struct mm_struct *mm, struct vm_area_struct *vma,
+			      unsigned long start, unsigned long end)
 {
 	struct hstate *h = hstate_vma(vma);
 	struct address_space *mapping = vma->vm_file->f_mapping;
@@ -8043,18 +8043,6 @@ int hugetlb_collapse(struct mm_struct *mm, struct vm_area_struct *vma,
 		return -ENOMEM;
 
 	tlb_gather_mmu(&tlb, mm);
-
-	/*
-	 * Grab the VMA lock and mapping sem for writing. This will prevent
-	 * concurrent high-granularity page table walks, so that we can safely
-	 * collapse and free page tables.
-	 *
-	 * This is the same locking that huge_pmd_unshare requires, so any
-	 * HugeTLB page table walker will need to hold one or both of these
-	 * locks to be safe.
-	 */
-	hugetlb_vma_lock_write(vma);
-	i_mmap_lock_write(vma->vm_file->f_mapping);
 
 	mmu_notifier_range_init(&range, MMU_NOTIFY_CLEAR, 0, mm, start, end);
 	mmu_notifier_invalidate_range_start(&range);
@@ -8135,10 +8123,28 @@ next_hpte:
 		curr += hugetlb_pte_size(&hpte);
 	}
 out:
-	i_mmap_unlock_write(vma->vm_file->f_mapping);
-	hugetlb_vma_unlock_write(vma);
 	mmu_notifier_invalidate_range_end(&range);
 	tlb_finish_mmu(&tlb);
+	return ret;
+}
+
+int hugetlb_collapse(struct mm_struct *mm, unsigned long start,
+		     unsigned long end)
+{
+	int ret = 0;
+	struct vm_area_struct *vma;
+
+	mmap_write_lock(mm);
+	while (start < end || ret) {
+		vma = find_vma(mm, start);
+		if (!vma || !is_vm_hugetlb_page(vma) || end > vma->vm_end) {
+			ret = -EINVAL;
+			break;
+		}
+		ret = __hugetlb_collapse(mm, vma, start, end);
+		start = vma->vm_end;
+	}
+	mmap_write_unlock(mm);
 	return ret;
 }
 
