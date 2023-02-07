@@ -5549,9 +5549,17 @@ int move_hugetlb_page_tables(struct vm_area_struct *vma,
 	return len + old_addr - old_end;
 }
 
+struct hugetlb_timings {
+	ktime_t times[8];
+	ktime_t invalidate_start;
+	ktime_t invalidate_end;
+	ktime_t tlb_finish_mmu;
+	unsigned long iters;
+};
+
 static void __unmap_hugepage_range(struct mmu_gather *tlb, struct vm_area_struct *vma,
 				   unsigned long start, unsigned long end,
-				   struct page *ref_page, zap_flags_t zap_flags)
+				   struct page *ref_page, zap_flags_t zap_flags, struct hugetlb_timings *timings)
 {
 	struct mm_struct *mm = vma->vm_mm;
 	unsigned long address;
@@ -5563,6 +5571,10 @@ static void __unmap_hugepage_range(struct mmu_gather *tlb, struct vm_area_struct
 	unsigned long sz = huge_page_size(h);
 	unsigned long last_addr_mask;
 	bool force_flush = false;
+	ktime_t t1, t2, t3, t4, t5, t6, t7, t8;
+	ktime_t t12 = 0, t23 = 0, t34 = 0, t45 = 0, t56 = 0, t67 = 0, t78 = 0;
+	unsigned long iters = 0;
+	ktime_t start_time = ktime_get();
 
 	tlb_start_vma(tlb, vma);
 
@@ -5570,11 +5582,13 @@ static void __unmap_hugepage_range(struct mmu_gather *tlb, struct vm_area_struct
 	address = start & PAGE_MASK;
 
 	while (address < end) {
+		t1 = ktime_get();
 		if (hugetlb_full_walk(&hpte, vma, address)) {
 			address = (address | last_addr_mask) + sz;
 			continue;
 		}
 
+		t2 = ktime_get();
 		ptl = hugetlb_pte_lock(&hpte);
 		if (hugetlb_pte_size(&hpte) == sz &&
 		    huge_pmd_unshare(mm, vma, address, hpte.ptep)) {
@@ -5644,8 +5658,11 @@ static void __unmap_hugepage_range(struct mmu_gather *tlb, struct vm_area_struct
 			set_vma_resv_flags(vma, HPAGE_RESV_UNMAPPED);
 		}
 
+		t3 = ktime_get();
+
 		pte = huge_ptep_get_and_clear(mm, address, hpte.ptep);
 		tlb_remove_huge_tlb_entry(tlb, hpte, address);
+		t4 = ktime_get();
 		if (huge_pte_dirty(pte))
 			set_page_dirty(hpage);
 		/* Leave a uffd-wp pte marker if needed */
@@ -5657,6 +5674,7 @@ static void __unmap_hugepage_range(struct mmu_gather *tlb, struct vm_area_struct
 
 		spin_unlock(ptl);
 
+		t5 = ktime_get();
 		if (hugetlb_pte_size(&hpte) == sz) {
 			page_remove_rmap(hpage, vma, true);
 			/*
@@ -5664,6 +5682,8 @@ static void __unmap_hugepage_range(struct mmu_gather *tlb, struct vm_area_struct
 			 */
 			tlb_remove_page_size(tlb, hpage, sz);
 		}
+		t6 = ktime_get();
+		t7 = ktime_get();
 		/*
 		 * Bail out after unmapping reference page if supplied,
 		 * and there's only one PTE mapping this page.
@@ -5672,8 +5692,31 @@ static void __unmap_hugepage_range(struct mmu_gather *tlb, struct vm_area_struct
 			break;
 next_hpte:
 		address += hugetlb_pte_size(&hpte);
+		t8 = ktime_get();
+		if (timings) {
+			t12 += (t2 - t1);
+			t23 += (t3 - t2);
+			t34 += (t4 - t3);
+			t45 += (t5 - t4);
+			t56 += (t6 - t5);
+			t67 += (t7 - t6);
+			t78 += (t8 - t7);
+			iters++;
+		}
 	}
 	tlb_end_vma(tlb, vma);
+
+	if (timings) {
+		timings->times[0] += t12;
+		timings->times[1] += t23;
+		timings->times[2] += t34;
+		timings->times[3] += t45;
+		timings->times[4] += t56;
+		timings->times[5] += t67;
+		timings->times[6] += t78;
+		timings->times[7] += ktime_get() - start_time;
+		timings->iters += iters;
+	}
 
 	/*
 	 * If we unshared PMDs, the TLB flush was not recorded in mmu_gather. We
@@ -5701,7 +5744,7 @@ void __unmap_hugepage_range_final(struct mmu_gather *tlb,
 	i_mmap_lock_write(vma->vm_file->f_mapping);
 
 	/* mmu notification performed in caller */
-	__unmap_hugepage_range(tlb, vma, start, end, ref_page, zap_flags);
+	__unmap_hugepage_range(tlb, vma, start, end, ref_page, zap_flags, NULL);
 
 	if (zap_flags & ZAP_FLAG_UNMAP) {	/* final unmap */
 		/*
@@ -5734,7 +5777,7 @@ void unmap_hugepage_range(struct vm_area_struct *vma, unsigned long start,
 	mmu_notifier_invalidate_range_start(&range);
 	tlb_gather_mmu(&tlb, vma->vm_mm);
 
-	__unmap_hugepage_range(&tlb, vma, start, end, ref_page, zap_flags);
+	__unmap_hugepage_range(&tlb, vma, start, end, ref_page, zap_flags, NULL);
 
 	mmu_notifier_invalidate_range_end(&range);
 	tlb_finish_mmu(&tlb);
@@ -8048,6 +8091,11 @@ static int __hugetlb_collapse(struct mm_struct *mm, struct vm_area_struct *vma,
 	bool shared = vma->vm_flags & VM_SHARED;
 	struct hugetlb_pte hpte;
 	pte_t entry;
+	ktime_t start_time, true_start_time;
+	struct hugetlb_timings timings;
+
+	memset(&timings, 0, sizeof(timings));
+	true_start_time = ktime_get();
 
 	/*
 	 * This is only supported for shared VMAs, because we need to look up
@@ -8072,7 +8120,9 @@ static int __hugetlb_collapse(struct mm_struct *mm, struct vm_area_struct *vma,
 
 	mmu_notifier_range_init(&range, MMU_NOTIFY_CLEAR, 0, mm, start, end);
 
+	start_time = ktime_get();
 	mmu_notifier_invalidate_range_start(&range);
+	timings.invalidate_start = ktime_get() - start_time;
 
 	while (curr < end) {
 		bool inc;
@@ -8142,7 +8192,7 @@ static int __hugetlb_collapse(struct mm_struct *mm, struct vm_area_struct *vma,
 		__unmap_hugepage_range(&tlb, vma, curr,
 			curr + hugetlb_pte_size(&hpte),
 			NULL,
-			ZAP_FLAG_DROP_MARKER);
+			ZAP_FLAG_DROP_MARKER, &timings);
 		/* Free the PTEs. */
 		hugetlb_free_pgd_range(&tlb,
 				curr, curr + hugetlb_pte_size(&hpte),
@@ -8160,9 +8210,14 @@ next_hpte:
 		curr += hugetlb_pte_size(&hpte);
 	}
 out:
+	start_time = ktime_get();
 	mmu_notifier_invalidate_range_end(&range);
+	timings.invalidate_end = ktime_get() - start_time;
+	start_time = ktime_get();
 	tlb_finish_mmu(&tlb);
+	timings.tlb_finish_mmu = ktime_get() - start_time;
 
+	pr_err_ratelimited("collapse: total:%lld\tinv_start:%lld\tunmap_total:%lld\tunmap_mapcount_dec:%lld(%lld%%))\titers:%lu\tinv_end:%lld\ttlb_finish:%lld\n", ktime_get() - true_start_time, timings.invalidate_start, timings.times[7], timings.times[4], timings.times[4] * 100 / timings.times[7], timings.iters, timings.invalidate_end, timings.tlb_finish_mmu);
 	return ret;
 }
 
