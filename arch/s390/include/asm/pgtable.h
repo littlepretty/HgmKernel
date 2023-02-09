@@ -1031,6 +1031,11 @@ static inline pte_t pte_mkspecial(pte_t pte)
 	return set_pte_bit(pte, __pgprot(_PAGE_SPECIAL));
 }
 
+static inline pte_t pte_mknonspecial(pte_t pte)
+{
+	return clear_pte_bit(pte, __pgprot(_PAGE_SPECIAL));
+}
+
 #ifdef CONFIG_HUGETLB_PAGE
 static inline pte_t pte_mkhuge(pte_t pte)
 {

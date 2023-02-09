@@ -234,6 +234,11 @@ static inline pte_t pte_mkspecial(pte_t pte)
 	return set_pte_bit(pte, __pgprot(PTE_SPECIAL));
 }
 
+static inline pte_t pte_mknonspecial(pte_t pte)
+{
+	return clear_pte_bit(pte, __pgprot(PTE_SPECIAL));
+}
+
 static inline pte_t pte_mkcont(pte_t pte)
 {
 	pte = set_pte_bit(pte, __pgprot(PTE_CONT));

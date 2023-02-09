@@ -186,6 +186,11 @@ static inline pte_t pte_mkspecial(pte_t pte)
 	pte_val(pte) |= L_PTE_SPECIAL;
 	return pte;
 }
+static inline pte_t pte_mknonspecial(pte_t pte)
+{
+	pte_val(pte) &= ~L_PTE_SPECIAL;
+	return pte;
+}
 
 #define pmd_write(pmd)		(pmd_isclear((pmd), L_PMD_SECT_RDONLY))
 #define pmd_dirty(pmd)		(pmd_isset((pmd), L_PMD_SECT_DIRTY))

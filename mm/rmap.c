@@ -1769,11 +1769,18 @@ discard:
 		 *
 		 * See Documentation/mm/mmu_notifier.rst
 		 */
-		if (folio_test_hugetlb(folio))
+		if (folio_test_hugetlb(folio)) {
+			unsigned long start = address & huge_page_mask(hstate_vma(vma));
+
+			spin_unlock(pvmw.ptl);
+			pvmw.ptl = NULL;
+			/* hugetlb_remove_rmap may take the PTL. */
 			hugetlb_remove_rmap(subpage,
+					address,
 					pvmw.pte_order + PAGE_SHIFT,
+					start, start + huge_page_size(hstate_vma(vma)),
 					hstate_vma(vma), vma);
-		else
+		} else
 			page_remove_rmap(subpage, vma, false);
 
 		if (vma->vm_flags & VM_LOCKED)
@@ -2137,11 +2144,18 @@ static bool try_to_migrate_one(struct folio *folio, struct vm_area_struct *vma,
 		 *
 		 * See Documentation/mm/mmu_notifier.rst
 		 */
-		if (folio_test_hugetlb(folio))
+		if (folio_test_hugetlb(folio)) {
+			unsigned long start = address & huge_page_mask(hstate_vma(vma));
+
+			spin_unlock(pvmw.ptl);
+			pvmw.ptl = NULL;
+			/* hugetlb_remove_rmap may take the PTL. */
 			hugetlb_remove_rmap(subpage,
+					address,
 					pvmw.pte_order + PAGE_SHIFT,
+					start, start + huge_page_size(hstate_vma(vma)),
 					hstate_vma(vma), vma);
-		else
+		} else
 			page_remove_rmap(subpage, vma, false);
 		if (vma->vm_flags & VM_LOCKED)
 			mlock_drain_local();

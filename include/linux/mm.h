@@ -2330,6 +2330,11 @@ static inline pte_t pte_mkspecial(pte_t pte)
 {
 	return pte;
 }
+
+static inline pte_t pte_mknonspecial(pte_t pte)
+{
+	return pte;
+}
 #endif
 
 #ifndef CONFIG_ARCH_HAS_PTE_DEVMAP

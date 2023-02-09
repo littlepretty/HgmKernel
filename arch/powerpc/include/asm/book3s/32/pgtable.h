@@ -518,6 +518,11 @@ static inline pte_t pte_mkspecial(pte_t pte)
 	return __pte(pte_val(pte) | _PAGE_SPECIAL);
 }
 
+static inline pte_t pte_mknonspecial(pte_t pte)
+{
+	return __pte(pte_val(pte) & ~_PAGE_SPECIAL);
+}
+
 static inline pte_t pte_mkhuge(pte_t pte)
 {
 	return pte;

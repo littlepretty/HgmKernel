@@ -259,6 +259,12 @@ static inline pte_t pte_mkspecial(pte_t pte)
 	pte.pte_low |= _PAGE_SPECIAL;
 	return pte;
 }
+
+static inline pte_t pte_mknonspecial(pte_t pte)
+{
+	pte.pte_low &= ~_PAGE_SPECIAL;
+	return pte;
+}
 #else
 static inline int pte_special(pte_t pte)
 {
@@ -268,6 +274,12 @@ static inline int pte_special(pte_t pte)
 static inline pte_t pte_mkspecial(pte_t pte)
 {
 	pte_val(pte) |= _PAGE_SPECIAL;
+	return pte;
+}
+
+static inline pte_t pte_mknonspecial(pte_t pte)
+{
+	pte_val(pte) &= ~_PAGE_SPECIAL;
 	return pte;
 }
 #endif

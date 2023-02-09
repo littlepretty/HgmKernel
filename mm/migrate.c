@@ -251,13 +251,19 @@ static bool remove_migration_pte(struct folio *folio,
 			unsigned int shift = pvmw.pte_order + PAGE_SHIFT;
 
 			pte = arch_make_huge_pte(pte, shift, vma->vm_flags);
+			set_huge_pte_at(vma->vm_mm, pvmw.address, pvmw.pte, pte);
+
+			/* Must drop the lock before hugetlb_add_file_rmap. */
+			spin_unlock(pvmw.ptl);
+			pvmw.ptl = NULL;
+
 			if (folio_test_anon(folio))
 				hugepage_add_anon_rmap(hpage, vma, pvmw.address,
 						       rmap_flags);
-			else
-				hugetlb_add_file_rmap(new, shift,
+			else {
+				hugetlb_add_file_rmap(new, pvmw.address, shift,
 						hstate_vma(vma), vma);
-			set_huge_pte_at(vma->vm_mm, pvmw.address, pvmw.pte, pte);
+			}
 		} else
 #endif
 		{

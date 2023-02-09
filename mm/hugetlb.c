@@ -124,26 +124,32 @@ enum hugetlb_level hpage_size_to_level(unsigned long sz)
 	return HUGETLB_LEVEL_PGD;
 }
 
-void hugetlb_remove_rmap(struct page *subpage, unsigned long shift,
-			 struct hstate *h, struct vm_area_struct *vma)
+static bool hugetlb_pte_rmap_account(struct hstate *h, struct vm_area_struct *vma, unsigned long addr);
+static bool hugetlb_pte_rmap_unaccount(struct hstate *h, struct vm_area_struct *vma, unsigned long addr);
+
+void hugetlb_remove_rmap(struct page *subpage, unsigned long addr,
+			 unsigned long shift,
+			 unsigned long floor, unsigned long ceil,
+			 struct hstate *h,
+			 struct vm_area_struct *vma)
 {
 	struct page *hpage = compound_head(subpage);
+	unsigned long last_addr_of_page = addr | ~huge_page_mask(h);
 
-	if (shift == huge_page_shift(h)) {
-		VM_BUG_ON_PAGE(subpage != hpage, subpage);
-		page_remove_rmap(subpage, vma, true);
-	} else {
-		unsigned long nr_subpages = 1UL << (shift - PAGE_SHIFT);
-		struct page *final_page = &subpage[nr_subpages];
+	/*
+	 * Are we in the middle of unmapping the entire page?
+	 */
+	if ((addr & huge_page_mask(h)) < floor)
+		return;
+	if (last_addr_of_page >= ceil)
+		return;
 
-		VM_BUG_ON_PAGE(HPageVmemmapOptimized(hpage), hpage);
-		/*
-		 * Decrement the mapcount on each page that is getting
-		 * unmapped.
-		 */
-		for (; subpage < final_page; ++subpage)
-			page_remove_rmap(subpage, vma, false);
-	}
+	/* are we the last one to unmap? */
+	if (addr + (1UL << shift) < last_addr_of_page)
+		return;
+
+	if (hugetlb_pte_rmap_unaccount(h, vma, addr & huge_page_mask(h)))
+		page_remove_rmap(hpage, vma, true);
 }
 /*
  * hugetlb_add_file_rmap() - increment the mapcounts for file-backed hugetlb
@@ -156,25 +162,14 @@ void hugetlb_remove_rmap(struct page *subpage, unsigned long shift,
  * For pages that are being mapped with high-granularity, we increment the
  * mapcounts for the individual subpages that are getting mapped.
  */
-void hugetlb_add_file_rmap(struct page *subpage, unsigned long shift,
-			   struct hstate *h, struct vm_area_struct *vma)
+void hugetlb_add_file_rmap(struct page *subpage, unsigned long addr,
+			   unsigned long shift, struct hstate *h,
+			   struct vm_area_struct *vma)
 {
 	struct page *hpage = compound_head(subpage);
 
-	if (shift == huge_page_shift(h)) {
-		VM_BUG_ON_PAGE(subpage != hpage, subpage);
-		page_add_file_rmap(hpage, vma, true);
-	} else {
-		unsigned long nr_subpages = 1UL << (shift - PAGE_SHIFT);
-		struct page *final_page = &subpage[nr_subpages];
-
-		VM_BUG_ON_PAGE(HPageVmemmapOptimized(hpage), hpage);
-		/*
-		 * Increment the mapcount on each page that is getting mapped.
-		 */
-		for (; subpage < final_page; ++subpage)
-			page_add_file_rmap(subpage, vma, false);
-	}
+	if (hugetlb_pte_rmap_account(h, vma, addr & huge_page_mask(h)))
+		page_dup_file_rmap(hpage, true);
 }
 
 /*
@@ -1501,6 +1496,66 @@ bool hugetlb_pte_present_leaf(const struct hugetlb_pte *hpte, pte_t pte)
 		WARN_ON_ONCE(1);
 		return false;
 	}
+}
+
+static bool hugetlb_pte_rmap_account(struct hstate *h, struct vm_area_struct *vma, unsigned long addr)
+{
+	struct hugetlb_pte hpte;
+	pte_t *ptep, pte;
+	bool account = true;
+	spinlock_t *ptl;
+
+	ptep = hugetlb_walk(vma, addr, huge_page_size(h));
+	hugetlb_pte_init(vma->vm_mm, &hpte, ptep, huge_page_shift(h),
+			 hpage_size_to_level(huge_page_size(h)));
+
+	pte = READ_ONCE(*hpte.ptep);
+	if (!pte_present(pte) || hugetlb_pte_present_leaf(&hpte, pte))
+		return account;
+
+	ptl = hugetlb_pte_lock(&hpte);
+	pte = READ_ONCE(*hpte.ptep);
+	if (!pte_present(pte) || hugetlb_pte_present_leaf(&hpte, pte))
+		goto out;
+
+	account = !pte_special(pte);
+	if (account) {
+		pte = pte_mkspecial(pte);
+		WRITE_ONCE(*hpte.ptep, pte);
+	}
+out:
+	spin_unlock(ptl);
+	return account;
+}
+
+static bool hugetlb_pte_rmap_unaccount(struct hstate *h, struct vm_area_struct *vma, unsigned long addr)
+{
+	struct hugetlb_pte hpte;
+	pte_t *ptep, pte;
+	bool unaccount = true;
+	spinlock_t *ptl;
+
+	ptep = hugetlb_walk(vma, addr, huge_page_size(h));
+	hugetlb_pte_init(vma->vm_mm, &hpte, ptep, huge_page_shift(h),
+			 hpage_size_to_level(huge_page_size(h)));
+
+	pte = READ_ONCE(*hpte.ptep);
+	if (!pte_present(pte) || hugetlb_pte_present_leaf(&hpte, pte))
+		return unaccount;
+
+	ptl = hugetlb_pte_lock(&hpte);
+	pte = READ_ONCE(*hpte.ptep);
+	if (!pte_present(pte) || hugetlb_pte_present_leaf(&hpte, pte))
+		goto out;
+
+	unaccount = pte_special(pte);
+	if (unaccount) {
+		pte = pte_mknonspecial(pte);
+		WRITE_ONCE(*hpte.ptep, pte);
+	}
+out:
+	spin_unlock(ptl);
+	return unaccount;
 }
 
 
@@ -5350,7 +5405,7 @@ again:
 			 * sleep during the process.
 			 */
 			if (!PageAnon(hpage)) {
-				hugetlb_add_file_rmap(ptepage,
+				hugetlb_add_file_rmap(ptepage, addr,
 						src_hpte.shift, h, src_vma);
 			} else if (page_try_dup_anon_rmap(hpage, true,
 							  src_vma)) {
@@ -5566,6 +5621,7 @@ static void __unmap_hugepage_range(struct mmu_gather *tlb, struct vm_area_struct
 		}
 
 		pte = huge_ptep_get(hpte.ptep);
+		subpage = NULL;
 
 		if (huge_pte_none(pte)) {
 			spin_unlock(ptl);
@@ -5634,20 +5690,24 @@ static void __unmap_hugepage_range(struct mmu_gather *tlb, struct vm_area_struct
 			set_huge_pte_at(mm, address, hpte.ptep,
 					make_pte_marker(PTE_MARKER_UFFD_WP));
 		hugetlb_count_sub(hugetlb_pte_size(&hpte)/PAGE_SIZE, mm);
-		hugetlb_remove_rmap(subpage, hpte.shift, h, vma);
 
 		spin_unlock(ptl);
+
+		hugetlb_remove_rmap(subpage, address, hpte.shift, start, end, h, vma);
+		subpage = NULL;
 		/*
 		 * Lower the reference count on the head page.
 		 */
 		tlb_remove_page_size(tlb, hpage, sz);
+next_hpte:
+		if (subpage)
+			hugetlb_remove_rmap(subpage, address, hpte.shift, start, end, h, vma);
 		/*
 		 * Bail out after unmapping reference page if supplied,
 		 * and there's only one PTE mapping this page.
 		 */
 		if (ref_page && hugetlb_pte_size(&hpte) == sz)
 			break;
-next_hpte:
 		address += hugetlb_pte_size(&hpte);
 	}
 	tlb_end_vma(tlb, vma);
@@ -5925,7 +5985,9 @@ retry_avoidcopy:
 		/* Break COW or unshare */
 		huge_ptep_clear_flush(vma, haddr, ptep);
 		mmu_notifier_invalidate_range(mm, range.start, range.end);
-		hugetlb_remove_rmap(old_page, huge_page_shift(h), h, vma);
+		hugetlb_remove_rmap(old_page, haddr,
+				    huge_page_shift(h),
+				    haddr, haddr + huge_page_size(h), h, vma);
 		hugepage_add_new_anon_rmap(new_folio, vma, haddr);
 		set_huge_pte_at(mm, haddr, ptep,
 				make_huge_pte(vma, &new_folio->page, !unshare,
@@ -6270,7 +6332,7 @@ static vm_fault_t hugetlb_no_page(struct mm_struct *mm,
 		hugepage_add_new_anon_rmap(folio, vma, haddr);
 	}
 	else
-		hugetlb_add_file_rmap(subpage, hpte->shift, h, vma);
+		hugetlb_add_file_rmap(subpage, haddr_hgm, hpte->shift, h, vma);
 
 	new_pte = make_huge_pte(vma, subpage,
 			((vma->vm_flags & VM_WRITE)
@@ -6683,7 +6745,8 @@ int hugetlb_mcopy_atomic_pte(struct mm_struct *dst_mm,
 	subpage = hugetlb_find_subpage(h, folio, dst_addr);
 
 	if (page_in_pagecache)
-		hugetlb_add_file_rmap(subpage, dst_hpte->shift, h, dst_vma);
+		hugetlb_add_file_rmap(subpage, dst_addr, dst_hpte->shift, h,
+				dst_vma);
 	else
 		hugepage_add_new_anon_rmap(folio, dst_vma, dst_addr);
 
@@ -8116,9 +8179,10 @@ static int __hugetlb_collapse(struct mm_struct *mm, struct vm_area_struct *vma,
 		}
 
 		subpage = hugetlb_find_subpage(h, folio, curr);
-		hugetlb_add_file_rmap(subpage, hpte.shift, h, vma);
 		entry = make_huge_pte(vma, subpage, writable, hpte.shift);
 		set_huge_pte_at(mm, curr, hpte.ptep, entry);
+
+		hugetlb_add_file_rmap(subpage, curr, hpte.shift, h, vma);
 next_hpte:
 		curr += hugetlb_pte_size(&hpte);
 	}

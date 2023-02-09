@@ -623,6 +623,11 @@ static inline pte_t pte_mkspecial(pte_t pte)
 	return __pte_raw(pte_raw(pte) | cpu_to_be64(_PAGE_SPECIAL));
 }
 
+static inline pte_t pte_mknonspecial(pte_t pte)
+{
+	return __pte_raw(pte_raw(pte) | cpu_to_be64(~_PAGE_SPECIAL));
+}
+
 static inline pte_t pte_mkhuge(pte_t pte)
 {
 	return pte;

@@ -382,6 +382,11 @@ static inline pte_t pte_mkspecial(pte_t pte)
 	return pte_set_flags(pte, _PAGE_SPECIAL);
 }
 
+static inline pte_t pte_mknonspecial(pte_t pte)
+{
+	return pte_clear_flags(pte, _PAGE_SPECIAL);
+}
+
 static inline pte_t pte_mkdevmap(pte_t pte)
 {
 	return pte_set_flags(pte, _PAGE_SPECIAL|_PAGE_DEVMAP);
@@ -832,7 +837,7 @@ static inline unsigned long pmd_page_vaddr(pmd_t pmd)
 
 static inline int pmd_bad(pmd_t pmd)
 {
-	return (pmd_flags(pmd) & ~(_PAGE_USER | _PAGE_ACCESSED)) !=
+	return (pmd_flags(pmd) & ~(_PAGE_USER | _PAGE_ACCESSED | _PAGE_SPECIAL)) !=
 	       (_KERNPG_TABLE & ~_PAGE_ACCESSED);
 }
 
@@ -872,7 +877,7 @@ static inline int pud_large(pud_t pud)
 
 static inline int pud_bad(pud_t pud)
 {
-	return (pud_flags(pud) & ~(_KERNPG_TABLE | _PAGE_USER)) != 0;
+	return (pud_flags(pud) & ~(_KERNPG_TABLE | _PAGE_USER | _PAGE_SPECIAL)) != 0;
 }
 #else
 #define pud_leaf	pud_large
@@ -906,7 +911,7 @@ static inline pud_t *p4d_pgtable(p4d_t p4d)
 
 static inline int p4d_bad(p4d_t p4d)
 {
-	unsigned long ignore_flags = _KERNPG_TABLE | _PAGE_USER;
+	unsigned long ignore_flags = _KERNPG_TABLE | _PAGE_USER | _PAGE_SPECIAL;
 
 	if (IS_ENABLED(CONFIG_PAGE_TABLE_ISOLATION))
 		ignore_flags |= _PAGE_NX;
@@ -949,7 +954,7 @@ static inline p4d_t *p4d_offset(pgd_t *pgd, unsigned long address)
 
 static inline int pgd_bad(pgd_t pgd)
 {
-	unsigned long ignore_flags = _PAGE_USER;
+	unsigned long ignore_flags = _PAGE_USER | _PAGE_SPECIAL;
 
 	if (!pgtable_l5_enabled())
 		return 0;

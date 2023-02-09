@@ -173,10 +173,13 @@ struct hugepage_subpool *hugepage_new_subpool(struct hstate *h, long max_hpages,
 						long min_hpages);
 void hugepage_put_subpool(struct hugepage_subpool *spool);
 
-void hugetlb_remove_rmap(struct page *subpage, unsigned long shift,
-			 struct hstate *h, struct vm_area_struct *vma);
-void hugetlb_add_file_rmap(struct page *subpage, unsigned long shift,
-			   struct hstate *h, struct vm_area_struct *vma);
+void hugetlb_remove_rmap(struct page *subpage, unsigned long addr,
+			 unsigned long shift, unsigned long floor,
+			 unsigned long ceil, struct hstate *h,
+			 struct vm_area_struct *vma);
+void hugetlb_add_file_rmap(struct page *subpage, unsigned long addr,
+			   unsigned long shift, struct hstate *h,
+			   struct vm_area_struct *vma);
 
 void hugetlb_dup_vma_private(struct vm_area_struct *vma);
 void clear_vma_resv_huge_pages(struct vm_area_struct *vma);
