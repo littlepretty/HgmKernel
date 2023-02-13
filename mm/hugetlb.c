@@ -506,6 +506,30 @@ static bool has_same_uncharge_info(struct file_region *rg,
 #endif
 }
 
+static void hugetlb_install_markers_pmd(pmd_t *pmdp, pte_marker marker)
+{
+	int i;
+
+	for (i = 0; i < PTRS_PER_PMD; ++i)
+		/*
+		 * WRITE_ONCE not needed because the pud hasn't been
+		 * installed yet.
+		 */
+		pmdp[i] = __pmd(pte_val(make_pte_marker(marker)));
+}
+
+static void hugetlb_install_markers_pte(pte_t *ptep, pte_marker marker)
+{
+	int i;
+
+	for (i = 0; i < PTRS_PER_PTE; ++i)
+		/*
+		 * WRITE_ONCE not needed because the pmd hasn't been
+		 * installed yet.
+		 */
+		ptep[i] = make_pte_marker(marker);
+}
+
 /*
  * hugetlb_alloc_pmd -- Allocate or find a PMD beneath a PUD-level hpte.
  *
@@ -528,23 +552,32 @@ pmd_t *hugetlb_alloc_pmd(struct mm_struct *mm, struct hugetlb_pte *hpte,
 	pmd_t *new;
 	pud_t *pudp;
 	pud_t pud;
+	bool is_marker;
+	pte_marker marker;
 
 	if (hpte->level != HUGETLB_LEVEL_PUD)
 		return ERR_PTR(-EINVAL);
 
 	pudp = (pud_t *)hpte->ptep;
 retry:
+	is_marker = false;
 	pud = READ_ONCE(*pudp);
 	if (likely(pud_present(pud)))
 		return unlikely(pud_leaf(pud))
 			? ERR_PTR(-EEXIST)
 			: pmd_offset(pudp, addr);
-	else if (!pud_none(pud))
+	else if (!pud_none(pud)) {
 		/*
-		 * Not present and not none means that a swap entry lives here,
-		 * and we can't get rid of it.
+		 * Not present and not none means that a swap entry lives here.
+		 * If it's a PTE marker, we can deal with it. If it's another
+		 * swap entry, we don't attempt to split it.
 		 */
-		return ERR_PTR(-EEXIST);
+		is_marker = is_pte_marker(__pte(pud_val(pud)));
+		if (!is_marker)
+			return ERR_PTR(-EEXIST);
+
+		marker = pte_marker_get(pte_to_swp_entry(__pte(pud_val(pud))));
+	}
 
 	new = pmd_alloc_one(mm, addr);
 	if (!new)
@@ -556,6 +589,13 @@ retry:
 		pmd_free(mm, new);
 		goto retry;
 	}
+
+	/*
+	 * Install markers before PUD to avoid races with other
+	 * page tables walks.
+	 */
+	if (is_marker)
+		hugetlb_install_markers_pmd(new, marker);
 
 	mm_inc_nr_pmds(mm);
 	smp_wmb(); /* See comment in pmd_install() */
@@ -576,23 +616,32 @@ pte_t *hugetlb_alloc_pte(struct mm_struct *mm, struct hugetlb_pte *hpte,
 	pgtable_t new;
 	pmd_t *pmdp;
 	pmd_t pmd;
+	bool is_marker;
+	pte_marker marker;
 
 	if (hpte->level != HUGETLB_LEVEL_PMD)
 		return ERR_PTR(-EINVAL);
 
 	pmdp = (pmd_t *)hpte->ptep;
 retry:
+	is_marker = false;
 	pmd = READ_ONCE(*pmdp);
 	if (likely(pmd_present(pmd)))
 		return unlikely(pmd_leaf(pmd))
 			? ERR_PTR(-EEXIST)
 			: pte_offset_kernel(pmdp, addr);
-	else if (!pmd_none(pmd))
+	else if (!pmd_none(pmd)) {
 		/*
-		 * Not present and not none means that a swap entry lives here,
-		 * and we can't get rid of it.
+		 * Not present and not none means that a swap entry lives here.
+		 * If it's a PTE marker, we can deal with it. If it's another
+		 * swap entry, we don't attempt to split it.
 		 */
-		return ERR_PTR(-EEXIST);
+		is_marker = is_pte_marker(__pte(pmd_val(pmd)));
+		if (!is_marker)
+			return ERR_PTR(-EEXIST);
+
+		marker = pte_marker_get(pte_to_swp_entry(__pte(pmd_val(pmd))));
+	}
 
 	/*
 	 * With CONFIG_HIGHPTE, calling `pte_alloc_one` directly may result
@@ -612,6 +661,9 @@ retry:
 		__free_page(new);
 		goto retry;
 	}
+
+	if (is_marker)
+		hugetlb_install_markers_pte(page_address(new), marker);
 
 	mm_inc_nr_ptes(mm);
 	smp_wmb(); /* See comment in pmd_install() */
@@ -7384,7 +7436,12 @@ static int __hugetlb_hgm_walk(struct mm_struct *mm, struct vm_area_struct *vma,
 		if (!pte_present(pte)) {
 			if (!alloc)
 				return 0;
-			if (unlikely(!huge_pte_none(pte)))
+			/*
+			 * In hugetlb_alloc_pmd and hugetlb_alloc_pte,
+			 * we split PTE markers, so we can tolerate
+			 * PTE markers here.
+			 */
+			if (unlikely(!huge_pte_none_mostly(pte)))
 				return -EEXIST;
 		} else if (hugetlb_pte_present_leaf(hpte, pte))
 			return 0;
