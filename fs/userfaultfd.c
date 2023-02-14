@@ -1899,13 +1899,15 @@ static int userfaultfd_continue(struct userfaultfd_ctx *ctx, unsigned long arg)
 	    uffdio_continue.range.start) {
 		goto out;
 	}
-	if (uffdio_continue.mode & ~UFFDIO_CONTINUE_MODE_DONTWAKE)
+	if (uffdio_continue.mode & ~(UFFDIO_CONTINUE_MODE_DONTWAKE |
+				     UFFDIO_CONTINUE_MODE_WP))
 		goto out;
 
 	if (mmget_not_zero(ctx->mm)) {
 		ret = mcopy_continue(ctx->mm, uffdio_continue.range.start,
 				     uffdio_continue.range.len,
-				     &ctx->mmap_changing);
+				     &ctx->mmap_changing,
+				     uffdio_continue.mode);
 		mmput(ctx->mm);
 	} else {
 		return -ESRCH;
