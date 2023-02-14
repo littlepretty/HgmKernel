@@ -71,14 +71,14 @@ int userfaultfd(int flags)
 	return syscall(__NR_userfaultfd, flags);
 }
 
-int map_range(int uffd, char *addr, uint64_t length)
+int map_range(int uffd, char *addr, uint64_t length, bool wp)
 {
 	struct uffdio_continue cont = {
 		.range = (struct uffdio_range) {
 			.start = (uint64_t)addr,
 			.len = length,
 		},
-		.mode = 0,
+		.mode = wp ? UFFDIO_CONTINUE_MODE_WP : 0,
 		.mapped = 0,
 	};
 
@@ -127,7 +127,7 @@ int check_equal(char *mapping, size_t length, char value)
 }
 
 int test_continues(int uffd, char *primary_map, char *secondary_map, size_t len,
-		   bool verify)
+		   bool verify, bool wp)
 {
 	size_t offset = 0;
 	unsigned char iter = 0;
@@ -143,7 +143,7 @@ int test_continues(int uffd, char *primary_map, char *secondary_map, size_t len,
 				primary_map + offset + size,
 				iter,
 				verify ? " (and verify)" : "");
-		if (map_range(uffd, primary_map + offset, size))
+		if (map_range(uffd, primary_map + offset, size, wp))
 			return -1;
 		if (verify && check_equal(primary_map + offset, size, iter))
 			return -1;
@@ -445,7 +445,8 @@ test_hgm(int fd, size_t hugepagesize, size_t len, enum test_type type)
 		if (test_sigbus(primary_map, false))
 			goto done;
 	}
-	if (test_continues(uffd, primary_map, secondary_map, len, verify))
+	if (test_continues(uffd, primary_map, secondary_map, len, verify,
+				uffd_wp))
 		goto done;
 	if (hwpoison) {
 		/* test_hwpoison can fail with TEST_SKIPPED. */
@@ -456,19 +457,13 @@ test_hgm(int fd, size_t hugepagesize, size_t len, enum test_type type)
 			goto done;
 		}
 	}
-	if (uffd_wp) {
+	if (uffd_wp)
 		/*
-		 * UFFDIO_CONTINUE will have cleared the write-protection of
-		 * these PTEs, so let's write-protect again.
-		 *
-		 * When UFFDIO_CONTINUE_MODE_WP exists, we no longer need to
-		 * re-write-protect.
+		 * We used UFFDIO_CONTINUE_MODE_WP, so we should still have
+		 * write-protection here.
 		 */
-		if (userfaultfd_writeprotect(uffd, primary_map, len, true))
-			goto done;
 		if (test_sigbus_range(primary_map, len, false))
 			goto done;
-	}
 	if (!hwpoison)
 		/*
 		 * test_fork() will verify memory contents. We can't do
