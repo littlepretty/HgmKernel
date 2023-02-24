@@ -342,7 +342,7 @@ static int test_fork(int uffd, char *primary_map, size_t len)
 			test_sigbus(primary_map + len - 1, false);
 		ret = 0;
 		exit(ret ? 1 : 0);
-	} else {
+	} else if (pid > 0) {
 		/* wait for the child to finish. */
 		waitpid(pid, &status, 0);
 		ret = WEXITSTATUS(status);
@@ -353,6 +353,9 @@ static int test_fork(int uffd, char *primary_map, size_t len)
 				test_sigbus(primary_map + len - 1, false);
 			ret = 0;
 		}
+	} else {
+		perror(ERROR_PREFIX "fork failed");
+		return -1;
 	}
 
 	pthread_join(uffd_thd, NULL);

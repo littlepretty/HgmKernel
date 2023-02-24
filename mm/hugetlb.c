@@ -5391,7 +5391,11 @@ again:
 		} else {
 			ptepage = pte_page(entry);
 			hpage = compound_head(ptepage);
-			if (try_get_page(hpage)) {
+			if (!try_get_page(hpage)) {
+				spin_unlock(src_ptl);
+				spin_unlock(dst_ptl);
+				pr_err_ratelimited("could not dup refs for hpage: %p %lx refs:%d",
+					hpage, addr, page_ref_count(hpage));
 				ret = -EFAULT;
 				break;
 			}
@@ -5422,6 +5426,9 @@ again:
 				pte_t src_pte_old = entry;
 				struct folio *new_folio;
 
+				spin_unlock(src_ptl);
+				spin_unlock(dst_ptl);
+
 				/*
 				 * If we are mapped at high granularity, we
 				 * may end up allocating lots and lots of
@@ -5434,8 +5441,6 @@ again:
 					break;
 				}
 
-				spin_unlock(src_ptl);
-				spin_unlock(dst_ptl);
 				/* Do not use reserve as it's private owned */
 				new_folio = alloc_hugetlb_folio(dst_vma, addr, 1);
 				if (IS_ERR(new_folio)) {
