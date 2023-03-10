@@ -3531,6 +3531,7 @@ extern const struct attribute_group memory_failure_attr_group;
  * @nr_expected_unmaps: if a VMA that maps @page when detected is eligible
  *   for high granularity mapping, @page is expected to be unmapped.
  * @nr_actual_unmaps: how many times the raw page is actually unmapped.
+ * @index: index of the poisoned subpage in the folio.
  */
 struct raw_hwp_page {
 	struct llist_node node;
@@ -3538,6 +3539,7 @@ struct raw_hwp_page {
 	int nr_vmas_mapped;
 	int nr_expected_unmaps;
 	int nr_actual_unmaps;
+	unsigned long index;
 };
 
 #ifdef CONFIG_HUGETLB_PAGE

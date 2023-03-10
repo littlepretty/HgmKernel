@@ -1957,6 +1957,7 @@ static int folio_set_hugetlb_hwpoison(struct folio *folio, struct page *page)
 		raw_hwp->nr_vmas_mapped = 0;
 		raw_hwp->nr_expected_unmaps = 0;
 		raw_hwp->nr_actual_unmaps = 0;
+		raw_hwp->index = folio_page_idx(folio, page);
 		llist_add(&raw_hwp->node, head);
 		if (hgm_enabled)
 			/*

@@ -6158,6 +6158,30 @@ static struct folio *hugetlb_try_find_lock_folio(struct address_space *mapping,
 	return folio;
 }
 
+static vm_fault_t hugetlb_no_page_hwpoison(struct mm_struct *mm,
+					   struct vm_area_struct *vma,
+					   struct folio *folio,
+					   unsigned long address,
+					   struct hugetlb_pte *hpte,
+					   unsigned int flags);
+
+#ifndef CONFIG_HUGETLB_HIGH_GRANULARITY_MAPPING
+static vm_fault_t hugetlb_no_page_hwpoison(struct mm_struct *mm,
+					   struct vm_area_struct *vma,
+					   struct folio *folio,
+					   unsigned long address,
+					   struct hugetlb_pte *hpte,
+					   unsigned int flags)
+{
+	if (unlikely(folio_test_hwpoison(folio))) {
+		return VM_FAULT_HWPOISON_LARGE |
+		       VM_FAULT_SET_HINDEX(hstate_index(hstate_vma(vma)));
+	}
+
+	return 0;
+}
+#endif
+
 static vm_fault_t hugetlb_no_page(struct mm_struct *mm,
 			struct vm_area_struct *vma,
 			struct address_space *mapping, pgoff_t idx,
@@ -6287,13 +6311,13 @@ static vm_fault_t hugetlb_no_page(struct mm_struct *mm,
 		/*
 		 * If memory error occurs between mmap() and fault, some process
 		 * don't have hwpoisoned swap entry for errored virtual address.
-		 * So we need to block hugepage fault by PG_hwpoison bit check.
+		 * So we need to block hugepage fault by hwpoison check:
+		 * - without HGM, the check is based on PG_hwpoison
+		 * - with HGM, check if the raw page for address is poisoned
 		 */
-		if (unlikely(folio_test_hwpoison(folio))) {
-			ret = VM_FAULT_HWPOISON_LARGE |
-				VM_FAULT_SET_HINDEX(hstate_index(h));
+		ret = hugetlb_no_page_hwpoison(mm, vma, folio, address, hpte, flags);
+		if (unlikely(ret))
 			goto backout_unlocked;
-		}
 
 		/* Check for page in userfault range. */
 		if (userfaultfd_minor(vma)) {
@@ -8426,6 +8450,11 @@ int hugetlb_split_to_shift(struct mm_struct *mm, struct vm_area_struct *vma,
 	 * the allocated PTEs created before splitting fails.
 	 */
 
+	/*
+	 * For none and UFFD_WP marker PTEs, given try_to_unmap_one doesn't
+	 * unmap them, delay the splitting until page fault happens. See the
+	 * hugetlb_no_page_hwpoison check in hugetlb_no_page.
+	 */
 	if (unlikely(huge_pte_none_mostly(old_entry))) {
 		ret = -EAGAIN;
 		goto skip;
@@ -8477,6 +8506,96 @@ skip:
 	spin_unlock(ptl);
 	mmu_notifier_invalidate_range_end(&range);
 	return ret;
+}
+
+/*
+ * Given a hugetlb PTE, if we want to split it into its next smaller level
+ * PTE, return what size we should use to do HGM walk with allocations.
+ * If given hugetlb PTE is already at smallest PAGESIZE, returns -EINVAL.
+ */
+static int hgm_next_size(struct vm_area_struct *vma, struct hugetlb_pte *hpte)
+{
+	struct hstate *h = hstate_vma(vma), *tmp_h;
+	unsigned int shift;
+	unsigned long curr_size = hugetlb_pte_size(hpte);
+	unsigned long next_size;
+
+	for_each_hgm_shift(h, tmp_h, shift) {
+		next_size = 1UL << shift;
+		if (next_size < curr_size)
+			return next_size;
+	}
+
+	return -EINVAL;
+}
+
+/*
+ * Check if address is in the range of a HWPOISON raw page.
+ * During checking hugetlb PTE may be split into smaller hguetlb PTEs.
+ */
+static vm_fault_t hugetlb_no_page_hwpoison(struct mm_struct *mm,
+					   struct vm_area_struct *vma,
+					   struct folio *folio,
+					   unsigned long address,
+					   struct hugetlb_pte *hpte,
+					   unsigned int flags)
+{
+	unsigned long range_start, range_end;
+	unsigned long start_index, end_index;
+	unsigned long folio_start = vma_address(folio_page(folio, 0), vma);
+	struct llist_node *t, *tnode;
+	struct llist_head *raw_hwp_head = raw_hwp_list_head(folio);
+	struct raw_hwp_page *p = NULL;
+	bool contain_hwpoison = false;
+	int hgm_size;
+	int hgm_ret = 0;
+
+	if (likely(!folio_test_hwpoison(folio)))
+		return 0;
+
+	if (hugetlb_enable_hgm_vma(vma))
+		return VM_FAULT_HWPOISON_LARGE |
+		       VM_FAULT_SET_HINDEX(hstate_index(hstate_vma(vma)));
+
+recheck:
+	range_start = address & hugetlb_pte_mask(hpte);
+	range_end = range_start + hugetlb_pte_size(hpte);
+	start_index = (range_start - folio_start) / PAGE_SIZE;
+	end_index = start_index + hugetlb_pte_size(hpte) / PAGE_SIZE;
+
+	contain_hwpoison = false;
+	llist_for_each_safe(tnode, t, raw_hwp_head->first) {
+		p = container_of(tnode, struct raw_hwp_page, node);
+		if (start_index <= p->index && p->index < end_index) {
+			contain_hwpoison = true;
+			break;
+		}
+	}
+
+	if (!contain_hwpoison)
+		return 0;
+
+	if (hugetlb_pte_size(hpte) == PAGE_SIZE)
+		return VM_FAULT_HWPOISON;
+
+	/*
+	 * hugetlb_fault already ensured hugetlb_vma_lock_read.
+	 * We also checked hugetlb_pte_size(hpte) != PAGE_SIZE,
+	 * so hgm_size must be something meaningful to HGM.
+	 */
+	hgm_size = hgm_next_size(vma, hpte);
+	VM_BUG_ON(hgm_size == -EINVAL);
+	hgm_ret = hugetlb_full_walk_alloc(hpte, vma, address, hgm_size);
+	if (hgm_ret) {
+		WARN_ON_ONCE(hgm_ret);
+		/*
+		 * When splitting using HGM fails, return like
+		 * HGM is not eligible or enabled.
+		 */
+		return VM_FAULT_HWPOISON_LARGE |
+		       VM_FAULT_SET_HINDEX(hstate_index(hstate_vma(vma)));
+	}
+	goto recheck;
 }
 
 #endif /* CONFIG_HUGETLB_HIGH_GRANULARITY_MAPPING */
