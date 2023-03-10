@@ -1325,14 +1325,13 @@ void page_add_file_rmap(struct page *page, struct vm_area_struct *vma,
 	if (likely(!compound)) {
 		first = atomic_inc_and_test(&page->_mapcount);
 		nr = first;
-		if (first && folio_test_large(folio)
-			  && !folio_test_hugetlb(folio)) {
+		if (first && folio_test_large(folio)) {
 			nr = atomic_inc_return_relaxed(mapped);
 			nr = (nr < COMPOUND_MAPPED);
 		}
 	} else {
 		first = atomic_inc_and_test(&folio->_entire_mapcount);
-		if (first && !folio_test_hugetlb(folio)) {
+		if (first) {
 			nr = atomic_add_return_relaxed(COMPOUND_MAPPED, mapped);
 			if (likely(nr < COMPOUND_MAPPED + COMPOUND_MAPPED)) {
 				nr_pmdmapped = folio_nr_pages(folio);
@@ -1378,24 +1377,17 @@ void page_remove_rmap(struct page *page, struct vm_area_struct *vma,
 
 	VM_BUG_ON_PAGE(compound && !PageHead(page), page);
 
-	/* Hugetlb pages are not counted in NR_*MAPPED */
-	if (unlikely(folio_test_hugetlb(folio)) && compound) {
-		atomic_dec(&folio->_entire_mapcount);
-		return;
-	}
-
 	/* Is page being unmapped by PTE? Is this its last map to be removed? */
 	if (likely(!compound)) {
 		last = atomic_add_negative(-1, &page->_mapcount);
 		nr = last;
-		if (last && folio_test_large(folio)
-			 && !folio_test_hugetlb(folio)) {
+		if (last && folio_test_large(folio)) {
 			nr = atomic_dec_return_relaxed(mapped);
 			nr = (nr < COMPOUND_MAPPED);
 		}
 	} else {
 		last = atomic_add_negative(-1, &folio->_entire_mapcount);
-		if (last && !folio_test_hugetlb(folio)) {
+		if (last) {
 			nr = atomic_sub_return_relaxed(COMPOUND_MAPPED, mapped);
 			if (likely(nr < COMPOUND_MAPPED)) {
 				nr_pmdmapped = folio_nr_pages(folio);
